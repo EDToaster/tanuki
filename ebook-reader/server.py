@@ -1,11 +1,79 @@
-import zipfile, io, os, re, base64
+import zipfile, io, os, re, base64, sqlite3, datetime
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from flask import Flask, jsonify, Response, send_file, send_from_directory, abort
+from flask import Flask, jsonify, Response, send_file, send_from_directory, abort, request
 from bs4 import BeautifulSoup, NavigableString
 
 app = Flask(__name__, static_folder='static')
 BOOKS_DIR = os.environ.get('BOOKS_DIR', './books')
+DB_PATH = os.environ.get('DB_PATH', '/data/progress.db')
+
+# ── SQLite schema + helpers ───────────────────────────────────────────────────
+
+_SCHEMA = """
+PRAGMA journal_mode=WAL;
+PRAGMA foreign_keys=ON;
+
+CREATE TABLE IF NOT EXISTS profiles (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT    UNIQUE NOT NULL COLLATE NOCASE,
+    created_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS progress (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile_id INTEGER NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    book_id    TEXT    NOT NULL,
+    chapter_id INTEGER NOT NULL,
+    page_index INTEGER NOT NULL,
+    updated_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    UNIQUE (profile_id, book_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_progress_profile      ON progress (profile_id);
+CREATE INDEX IF NOT EXISTS idx_progress_profile_book ON progress (profile_id, book_id);
+"""
+
+
+def init_db():
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
+    con = sqlite3.connect(DB_PATH)
+    con.executescript(_SCHEMA)
+    con.close()
+
+
+def get_db():
+    con = sqlite3.connect(DB_PATH, detect_types=sqlite3.PARSE_DECLTYPES)
+    con.row_factory = sqlite3.Row
+    con.execute('PRAGMA foreign_keys=ON')
+    return con
+
+
+_PROFILE_NAME_RE = re.compile(r'^[a-zA-Z0-9_-]{1,32}$')
+
+
+def validate_profile_name(name: str) -> bool:
+    return bool(_PROFILE_NAME_RE.match(name))
+
+
+def _get_or_create_profile_id(con, name: str):
+    if not validate_profile_name(name):
+        return None
+    row = con.execute('SELECT id FROM profiles WHERE name=? COLLATE NOCASE', (name,)).fetchone()
+    if row:
+        return row['id']
+    con.execute('INSERT INTO profiles (name) VALUES (?)', (name,))
+    return con.execute('SELECT id FROM profiles WHERE name=? COLLATE NOCASE', (name,)).fetchone()['id']
+
+
+def _require_profile_id(con, name: str) -> int:
+    row = con.execute('SELECT id FROM profiles WHERE name=? COLLATE NOCASE', (name,)).fetchone()
+    if not row:
+        abort(404)
+    return row['id']
+
 
 NS = {
     'container': 'urn:oasis:names:tc:opendocument:xmlns:container',
@@ -214,10 +282,110 @@ def chapter(book_id, index):
     return Response(wrapped, mimetype='text/html; charset=utf-8')
 
 
+# ── Profile endpoints ─────────────────────────────────────────────────────────
+
+@app.route('/api/profiles', methods=['GET'])
+def list_profiles():
+    with get_db() as con:
+        rows = con.execute('SELECT name, created_at FROM profiles ORDER BY created_at').fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route('/api/profiles', methods=['POST'])
+def create_profile():
+    body = request.get_json(silent=True) or {}
+    name = body.get('name', '')
+    if not validate_profile_name(name):
+        return jsonify({'error': 'name must be 1–32 chars, letters/digits/hyphens/underscores only'}), 400
+    try:
+        with get_db() as con:
+            con.execute('INSERT INTO profiles (name) VALUES (?)', (name,))
+            row = con.execute('SELECT name, created_at FROM profiles WHERE name=? COLLATE NOCASE', (name,)).fetchone()
+        return jsonify(dict(row)), 201
+    except sqlite3.IntegrityError:
+        return jsonify({'error': f"profile '{name}' already exists"}), 409
+
+
+@app.route('/api/profiles/<name>', methods=['DELETE'])
+def delete_profile(name):
+    with get_db() as con:
+        cur = con.execute('DELETE FROM profiles WHERE name=? COLLATE NOCASE', (name,))
+    if cur.rowcount == 0:
+        abort(404)
+    return Response(status=204)
+
+
+# ── Progress endpoints ────────────────────────────────────────────────────────
+
+@app.route('/api/u/<name>/progress', methods=['GET'])
+def get_all_progress(name):
+    with get_db() as con:
+        profile_id = _require_profile_id(con, name)
+        rows = con.execute(
+            'SELECT book_id, chapter_id, page_index, updated_at FROM progress WHERE profile_id=?',
+            (profile_id,)
+        ).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route('/api/u/<name>/progress/<book_id>', methods=['GET'])
+def get_progress(name, book_id):
+    with get_db() as con:
+        profile_id = _require_profile_id(con, name)
+        row = con.execute(
+            'SELECT book_id, chapter_id, page_index, updated_at FROM progress WHERE profile_id=? AND book_id=?',
+            (profile_id, book_id)
+        ).fetchone()
+    if not row:
+        abort(404)
+    return jsonify(dict(row))
+
+
+@app.route('/api/u/<name>/progress/<book_id>', methods=['PUT'])
+def put_progress(name, book_id):
+    body = request.get_json(silent=True) or {}
+    chapter_id = body.get('chapter_id')
+    page_index  = body.get('page_index')
+    if not isinstance(chapter_id, int) or not isinstance(page_index, int) or chapter_id < 0 or page_index < 0:
+        return jsonify({'error': 'chapter_id and page_index must be non-negative integers'}), 400
+    with get_db() as con:
+        profile_id = _get_or_create_profile_id(con, name)
+        if profile_id is None:
+            abort(400)
+        now = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
+        con.execute(
+            '''INSERT INTO progress (profile_id, book_id, chapter_id, page_index, updated_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(profile_id, book_id) DO UPDATE SET
+                   chapter_id=excluded.chapter_id,
+                   page_index=excluded.page_index,
+                   updated_at=excluded.updated_at''',
+            (profile_id, book_id, chapter_id, page_index, now)
+        )
+        row = con.execute(
+            'SELECT book_id, chapter_id, page_index, updated_at FROM progress WHERE profile_id=? AND book_id=?',
+            (profile_id, book_id)
+        ).fetchone()
+    return jsonify(dict(row))
+
+
+@app.route('/api/u/<name>/progress/<book_id>', methods=['DELETE'])
+def delete_progress(name, book_id):
+    with get_db() as con:
+        profile_id = _require_profile_id(con, name)
+        con.execute('DELETE FROM progress WHERE profile_id=? AND book_id=?', (profile_id, book_id))
+    return Response(status=204)
+
+
+# ── SPA routing ───────────────────────────────────────────────────────────────
+
 @app.route('/')
-def index():
-    return send_from_directory('static', 'index.html')
+@app.route('/u/<name>/')
+@app.route('/u/<name>/book/<book_id>')
+def spa(name=None, book_id=None):
+    return send_from_directory(app.static_folder, 'index.html')
 
 
 if __name__ == '__main__':
+    init_db()
     app.run(host='0.0.0.0', port=8090, debug=True)
