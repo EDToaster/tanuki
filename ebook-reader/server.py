@@ -131,28 +131,40 @@ def get_chapter_paths(data: bytes) -> list[str]:
         return [f"{base}/{manifest[ref.get('idref')]}" for ref in spine]
 
 
+_meta_cache: dict[str, tuple[float, dict]] = {}  # path → (mtime, metadata)
+
+
+def _cached_epub_meta(epub_path: Path) -> dict | None:
+    key   = str(epub_path)
+    mtime = epub_path.stat().st_mtime
+    if key in _meta_cache and _meta_cache[key][0] == mtime:
+        return _meta_cache[key][1]
+    try:
+        data = epub_path.read_bytes()
+        meta = parse_epub_metadata(data)
+        meta['chapter_count'] = len(get_chapter_paths(data))
+        _meta_cache[key] = (mtime, meta)
+        return meta
+    except Exception:
+        return None
+
+
 # ── Library ───────────────────────────────────────────────────────────────────
 
 @app.route('/library')
 def library():
-    books_path = Path(BOOKS_DIR)
     books = []
-    for epub_path in sorted(books_path.glob('*.epub')):
-        data = epub_path.read_bytes()
-        try:
-            meta = parse_epub_metadata(data)
-            chapters = get_chapter_paths(data)
-            book_id = epub_path.stem
+    for epub_path in sorted(Path(BOOKS_DIR).glob('*.epub')):
+        meta = _cached_epub_meta(epub_path)
+        if meta:
             books.append({
-                'id': book_id,
+                'id': epub_path.stem,
                 'title': meta['title'],
                 'author': meta['author'],
                 'language': meta['language'],
-                'chapter_count': len(chapters),
-                'cover_url': f'/book/{book_id}/cover',
+                'chapter_count': meta['chapter_count'],
+                'cover_url': f'/book/{epub_path.stem}/cover',
             })
-        except Exception:
-            continue
     return jsonify(books)
 
 

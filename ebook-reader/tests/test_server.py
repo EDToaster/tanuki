@@ -666,3 +666,66 @@ def test_wrap_preserves_existing_tags():
     result = wrap_with_segmenter('<p><strong>中文</strong></p>', 'zh')
     assert '<strong>' in result
     assert '<span class="w"' in result
+
+
+# ── Phase 6: server-side EPUB metadata cache ─────────────────────────────────
+
+import server as _server_module
+
+def test_cached_epub_meta_caches_on_second_call(tmp_path, monkeypatch):
+    """parse_epub_metadata is called only once for the same mtime."""
+    epub = tmp_path / 'test.epub'
+    epub.write_bytes(make_epub())
+    # Clear the cache so we start fresh
+    _server_module._meta_cache.clear()
+
+    parse_calls = []
+    original_parse = _server_module.parse_epub_metadata
+    def counted_parse(data):
+        parse_calls.append(1)
+        return original_parse(data)
+    monkeypatch.setattr(_server_module, 'parse_epub_metadata', counted_parse)
+
+    _server_module._cached_epub_meta(epub)
+    _server_module._cached_epub_meta(epub)
+    assert len(parse_calls) == 1   # second call is a cache hit
+
+def test_cached_epub_meta_invalidates_on_mtime_change(tmp_path, monkeypatch):
+    """Cache is invalidated when file mtime changes."""
+    epub = tmp_path / 'test.epub'
+    epub.write_bytes(make_epub(title='Old Title'))
+    _server_module._meta_cache.clear()
+
+    _server_module._cached_epub_meta(epub)
+
+    # Write new bytes — this changes mtime
+    epub.write_bytes(make_epub(title='New Title'))
+    meta = _server_module._cached_epub_meta(epub)
+    assert meta['title'] == 'New Title'
+
+def test_cached_epub_meta_returns_none_for_invalid_epub(tmp_path):
+    """Returns None for corrupt/unreadable EPUBs instead of raising."""
+    epub = tmp_path / 'bad.epub'
+    epub.write_bytes(b'not an epub')
+    _server_module._meta_cache.clear()
+    result = _server_module._cached_epub_meta(epub)
+    assert result is None
+
+def test_library_uses_cache(client, tmp_path, monkeypatch):
+    """Two /library requests hit parse_epub_metadata only once per book."""
+    _server_module._meta_cache.clear()
+    epub_data = make_epub(title='Test', language='zh', chapters=2)
+    (tmp_path / 'my-book.epub').write_bytes(epub_data)
+
+    parse_calls = []
+    original_parse = _server_module.parse_epub_metadata
+    def counted_parse(data):
+        parse_calls.append(1)
+        return original_parse(data)
+    monkeypatch.setattr(_server_module, 'parse_epub_metadata', counted_parse)
+    monkeypatch.setattr(_server_module, 'BOOKS_DIR', str(tmp_path))
+
+    client.get('/library')
+    client.get('/library')
+    # parse_epub_metadata should be called at most once across both requests
+    assert len(parse_calls) <= 1
