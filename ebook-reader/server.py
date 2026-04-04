@@ -106,7 +106,8 @@ def _open_epub(data: bytes):
 def _opf_root(z: zipfile.ZipFile):
     container = ET.fromstring(z.read('META-INF/container.xml'))
     opf_path = container.find('.//container:rootfile', NS).get('full-path')
-    return ET.fromstring(z.read(opf_path)), opf_path.rsplit('/', 1)[0]
+    base = opf_path.rsplit('/', 1)[0] if '/' in opf_path else ''
+    return ET.fromstring(z.read(opf_path)), base
 
 
 def parse_epub_metadata(data: bytes) -> dict:
@@ -128,7 +129,11 @@ def get_chapter_paths(data: bytes) -> list[str]:
             for item in root.findall('opf:manifest/opf:item', NS)
         }
         spine = root.findall('opf:spine/opf:itemref', NS)
-        return [f"{base}/{manifest[ref.get('idref')]}" for ref in spine]
+        paths = []
+        for ref in spine:
+            href = manifest[ref.get('idref')]
+            paths.append(f"{base}/{href}" if base else href)
+        return paths
 
 
 _meta_cache: dict[str, tuple[float, dict]] = {}  # path → (mtime, metadata)
@@ -204,7 +209,8 @@ def get_cover_bytes(data: bytes) -> tuple[bytes, str] | None:
             media = item.get('media-type', '')
             if 'cover-image' in props or 'cover' in item.get('id', ''):
                 if media.startswith('image/'):
-                    href = f"{base}/{item.get('href')}"
+                    item_href = item.get('href')
+                    href = f"{base}/{item_href}" if base else item_href
                     try:
                         return z.read(href), media
                     except KeyError:
