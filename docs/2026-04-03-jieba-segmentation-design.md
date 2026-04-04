@@ -1,20 +1,113 @@
-# jieba Segmentation Design for Chinese Chapter Pipeline
+# Segmentation Pipeline Design: Language-Agnostic Interface + jieba for Chinese
 
 **Date:** 2026-04-03
 **Explorer:** explorer-jieba
-**Scope:** Server-side Chinese word segmentation via jieba for the ebook reader chapter pipeline
+**Scope:** Language-agnostic segmenter interface for the ebook reader chapter pipeline, with jieba as the Chinese implementation
 
 ---
 
 ## Summary
 
-The current pipeline wraps every individual CJK character in a tappable `<span class="w">`, which produces useful lookup results only ~40% of the time (single-character words). The other ~60% of taps land on characters that are components of multi-character compounds — the standalone character entry doesn't reflect the compound's meaning (e.g., tapping 电 in 电话 yields "electricity" not "telephone").
+The current pipeline hardcodes two language-specific behaviors in step 4: character-level wrapping for Chinese and space-splitting for Korean. As the reader adds more languages and smarter segmenters (jieba for Chinese, josa-stripping for Korean), this branching grows unwieldy.
 
-**Recommendation:** Add server-side jieba segmentation to the chapter pre-processing pipeline. jieba correctly segments Chinese into words (1–4 characters), dramatically improving tap-to-lookup accuracy from ~40% to ~80–85%.
+**Design:** Replace the hardcoded language branches with a **segmenter registry** — each language registers a segmenter, the pipeline calls `get_segmenter(lang).segment(text)`, and gets back a uniform list of `(word, lookup_term)` pairs. New languages and improved segmenters can be added without touching the pipeline.
+
+**Chinese improvement:** jieba segmentation raises tap-to-lookup accuracy from ~40% (character-level) to ~80–85% for Chinese.
 
 ---
 
-## 1. jieba Integration in the Chapter Pipeline
+## 1. Language-Agnostic Segmenter Interface
+
+### The Problem with Hardcoded Branching
+
+The current pipeline step 4 is effectively:
+
+```
+if lang == "zh":
+    wrap every \u4e00–\u9fff character individually
+elif lang == "ko":
+    split on whitespace
+else:
+    no wrapping
+```
+
+With jieba (Chinese) and josa-stripping (Korean) added, this becomes a growing if/elif chain where each branch has its own logic. Adding a third language (Japanese, Vietnamese, etc.) requires editing the pipeline itself.
+
+### The Segmenter Interface
+
+Each segmenter implements a single method:
+
+```
+segment(text: str) → list of (word: str, lookup_term: str)
+```
+
+Where:
+- `word` is the display string (what appears in the span's visible text)
+- `lookup_term` is the dictionary key (may differ from `word` when stripping affixes)
+
+If `word == lookup_term`, no `data-lookup` attribute is needed on the span.
+
+### Segmenter Implementations
+
+| Class | Language | Strategy | New deps |
+|-------|----------|----------|----------|
+| `JiebaSegmenter` | `zh` | `jieba.cut()`, default mode | `jieba` |
+| `KoreanJosaSegmenter` | `ko` | whitespace split + longest-match josa strip | none |
+| `WhitespaceSegmenter` | default | split on whitespace | none |
+| `NullSegmenter` | (opt-out) | returns no tokens (no wrapping) | none |
+
+### Segmenter Registry
+
+A module-level dict maps language codes to segmenter instances:
+
+```
+SEGMENTERS = {
+    "zh":      JiebaSegmenter(),
+    "zh-TW":   JiebaSegmenter(),   # Traditional Chinese — same segmenter
+    "zh-HK":   JiebaSegmenter(),
+    "ko":      KoreanJosaSegmenter(),
+    # default (all other langs): WhitespaceSegmenter()
+}
+
+def get_segmenter(lang: str) -> Segmenter:
+    return SEGMENTERS.get(lang, WhitespaceSegmenter())
+```
+
+Segmenter instances are singletons — created once at module import, reused across all requests. `JiebaSegmenter.__init__()` calls `jieba.initialize()` to pre-load the dictionary.
+
+### Pipeline Step 4 (Revised)
+
+```
+segmenter = get_segmenter(lang)
+For each text node containing wrappable content:
+    tokens = segmenter.segment(text_node_content)
+    For each (word, lookup_term) in tokens:
+        if word != lookup_term:
+            emit: <span class="w" data-lookup="{lookup_term}">{word}</span>
+        else:
+            emit: <span class="w">{word}</span>
+    Replace original text node with emitted sequence
+```
+
+The pipeline has zero knowledge of Chinese, Korean, or any language. It only calls `segment()` and maps the (word, lookup_term) pairs to HTML.
+
+### WhitespaceSegmenter Behavior
+
+For non-CJK, non-Korean languages (English, French, etc.), whitespace splitting means wrapping each space-delimited token. This is the v1 "other languages" behavior, unchanged. lookup_term == word always (no affix stripping), so no `data-lookup` attributes are emitted.
+
+### Adding a Future Language
+
+To add Japanese (e.g., with SudachiPy):
+
+```
+SEGMENTERS["ja"] = SudachiSegmenter()
+```
+
+One line in the registry. The pipeline, BeautifulSoup traversal, and span-emitting logic are untouched.
+
+---
+
+## 2. jieba Integration in the Chapter Pipeline
 
 ### Current Pipeline Step 4 (Chinese)
 
@@ -22,16 +115,21 @@ The current pipeline wraps every individual CJK character in a tappable `<span c
 For each text node: replace every char in \u4e00–\u9fff with <span class="w">char</span>
 ```
 
-### Proposed Pipeline Step 4 (Chinese with jieba)
+### Proposed Pipeline Step 4 (via segmenter interface)
+
+The pipeline now calls `get_segmenter(lang).segment(text)` generically. For `lang="zh"`, the `JiebaSegmenter` implementation:
 
 ```
-For each text node containing CJK characters:
-  1. Run jieba.cut(text_node_content) → list of tokens
-  2. For each token:
-     - If token contains CJK characters: emit <span class="w" [data-lookup]>token</span>
-     - Otherwise (punctuation, spaces, Latin, etc.): emit as plain text node
-  3. Replace the original text node with the new sequence
+1. Call jieba.cut(text) → list of tokens
+2. For each token:
+   - If token contains CJK characters: return (token, token)  [word == lookup_term]
+   - Otherwise: return (token, None)  [None means: emit as plain text, no span]
 ```
+
+The `JiebaSegmenter.segment()` method returns `(word, lookup_term)` pairs where:
+- CJK multi-char tokens: `("电话", "电话")` → emits `<span class="w" data-lookup="电话">电话</span>`
+- CJK single-char tokens: `("我", "我")` → emits `<span class="w">我</span>` (word==lookup_term, no attribute)
+- Non-CJK tokens: `(",", None)` → emits plain text `,`
 
 ### Composing with BeautifulSoup HTML Processing
 
@@ -120,15 +218,15 @@ No other changes to requirements.txt. BeautifulSoup (`beautifulsoup4`) is alread
 
 **Default lazy-load behavior:** jieba loads its trie dictionary on the **first call** to `jieba.cut()`. This takes ~0.5–1.0 seconds (dictionary parse + trie construction). If not pre-loaded, the very first chapter request after server startup will have ~1s of extra latency.
 
-**Mitigation: module-level initialization**
+**Mitigation: initialize in `JiebaSegmenter.__init__()`**
 
 ```python
-# At the top of the server module, after imports:
-import jieba
-jieba.initialize()  # Pre-loads dictionary at startup, not at first request
+class JiebaSegmenter:
+    def __init__(self):
+        jieba.initialize()  # Called once when the singleton is constructed at module load
 ```
 
-`jieba.initialize()` is documented in jieba's README specifically for this use case. Called at module level, it runs once when the server process starts and incurs the ~1s penalty only at startup — not during any user request.
+Since `SEGMENTERS["zh"] = JiebaSegmenter()` is module-level, this runs exactly once at server startup and incurs the ~1s penalty only then — not during any user request. `jieba.initialize()` is documented in jieba's README specifically for this use case.
 
 **Why this is correct for this deployment:** The ebook reader runs as a single long-lived Docker container process. Module-level initialization is standard Python practice (analogous to establishing a DB connection pool at startup). There is no serverless/per-process-per-request concern here.
 
@@ -286,19 +384,19 @@ jieba segmentation is orthogonal to dictionary choice — the segmented word is 
 
 ### Section: "Chapter Pre-processing Pipeline"
 
-Replace:
+Replace the entire step 4 with:
 
-> **Chinese (`zh`):** every individual character (including punctuation skipped — only wrap `\u4e00-\u9fff` and CJK extension ranges)
-
-With:
-
-> **Chinese (`zh`):** every word as segmented by jieba (server-side, `jieba.cut()` default mode). Single-character words are wrapped as `<span class="w">char</span>`; multi-character words are wrapped as `<span class="w" data-lookup="word">word</span>`. Non-CJK content (punctuation, spaces, Latin) is not wrapped. jieba is initialized at server startup via `jieba.initialize()` to avoid per-request dictionary loading overhead.
+> **Step 4 — Wrap tappable units via language segmenter:**
+> Call `get_segmenter(lang).segment(text)` on each text node. The segmenter returns `(word, lookup_term)` pairs. Emit `<span class="w" [data-lookup]>word</span>` for each word-like token; non-word tokens (punctuation, whitespace) are emitted as plain text. Language-specific behavior is fully encapsulated in the segmenter:
+> - **`zh`/`zh-TW`/`zh-HK`** → `JiebaSegmenter`: jieba default-mode word segmentation
+> - **`ko`** → `KoreanJosaSegmenter`: whitespace split + particle stripping
+> - **Other** → `WhitespaceSegmenter`: whitespace split, no affix stripping
 
 ### Section: "Dictionary Popup"
 
-Already uses `innerText` for lookup. Update to:
+Update lookup key to:
 
-> **Lookup key:** use `span.dataset.lookup || span.innerText` (same pattern as Korean). For Chinese, multi-character words carry `data-lookup`; single-character words use `innerText` directly.
+> **Lookup key:** `span.dataset.lookup || span.innerText`. Segmenters populate `data-lookup` when the dictionary key differs from the displayed word (Korean particle stripping, Chinese multi-char compounds). Single-char Chinese words and unsegmented whitespace tokens use `innerText` directly.
 
 ### Section: "Out of Scope (v1)"
 
@@ -306,11 +404,11 @@ Remove:
 
 > CJK word segmentation — user selects multi-character phrases manually
 
-(jieba segmentation is now in scope for v1 Chinese.)
+(Both Chinese jieba segmentation and Korean josa-stripping are now in scope for v1, unified under the segmenter interface.)
 
 ### Section: "Stack" / requirements.txt
 
-Add: `jieba==0.42.1` (pure Python, no system dependencies, no build step).
+Add: `jieba==0.42.1` (pure Python, no system dependencies, no build step). No other new dependencies.
 
 ---
 
