@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Reader</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div id="library-view" class="view active">
+    <header class="topbar">
+      <span class="topbar-title">Library</span>
+    </header>
+    <div id="book-grid"></div>
+  </div>
+
+  <div id="reader-view" class="view">
+    <header class="topbar">
+      <button id="back-btn">←</button>
+      <span id="book-title" class="topbar-title"></span>
+      <span id="page-indicator"></span>
+    </header>
+    <div id="chapter-container"></div>
+    <div id="lookup-popup" class="popup hidden">
+      <div class="popup-header">
+        <span id="popup-word"></span>
+        <button id="popup-close">✕</button>
+      </div>
+      <div id="popup-pronunciation"></div>
+      <div id="popup-definitions"></div>
+      <a id="popup-source-link" target="_blank"></a>
+    </div>
+    <div id="lookup-pill" class="hidden">Look up</div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
