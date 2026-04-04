@@ -8,6 +8,8 @@ const state = {
   profile: null,   // current profile name
 };
 
+const dictCache = new Map();  // `${lang}:${word}` → result object or null (not-found)
+
 // ── Router ────────────────────────────────────────────────────────────────────
 function navigate(url) {
   history.pushState({}, '', url);
@@ -140,6 +142,7 @@ async function showReader(profile, bookId) {
   state.chapter = 0;
   state.page = 0;
   state.cache.clear();
+  dictCache.clear();
 
   // Fetch library to find book metadata
   const books = await fetch('/library').then(r => r.json()).catch(() => []);
@@ -309,6 +312,7 @@ document.addEventListener('keydown', e => {
 });
 
 document.getElementById('back-btn').addEventListener('click', () => {
+  dictCache.clear();   // clear stale entries across reading sessions
   const profile = state.profile;
   if (profile) navigate(`/u/${profile}/`);
   else navigate('/');
@@ -317,10 +321,29 @@ document.getElementById('back-btn').addEventListener('click', () => {
 // ── Dictionary ───────────────────────────────────────────────────────────────
 
 async function lookupWord(word) {
-  showPopup(word, null, null, null);  // loading state
-
   const lang = document.querySelector('article[data-lang]')?.dataset.lang
              ?? state.current?.language ?? '*';
+  const cacheKey = `${lang}:${word}`;
+
+  if (dictCache.has(cacheKey)) {
+    // Render from cache — avoid any network request
+    const cached = dictCache.get(cacheKey);
+    if (!cached) {
+      showPopup(word, '', ['No dictionary entry found.'], null);
+    } else {
+      const pronunciation = cached.readings?.[0]?.text ?? '';
+      const definitions = (cached.definitions ?? []).slice(0, 5).map(d => d.text);
+      const sourceLabel = cached.source === 'nikl'
+        ? 'Open in KRDICT ↗'
+        : cached.source === 'wiktionary'
+        ? 'Open in Wiktionary ↗'
+        : 'Open source ↗';
+      showPopup(word, pronunciation, definitions, cached.source_url, sourceLabel);
+    }
+    return;
+  }
+
+  showPopup(word, null, null, null);  // loading state
 
   let result = null;
   let networkError = false;
@@ -339,6 +362,9 @@ async function lookupWord(word) {
     showPopup(word, '', ['Network error — check connection.'], null);
     return;
   }
+
+  // Cache the result (null for not-found, avoids re-fetch)
+  dictCache.set(cacheKey, result.not_found ? null : result);
 
   if (result.not_found) {
     showPopup(word, '', ['No dictionary entry found.'], null);
