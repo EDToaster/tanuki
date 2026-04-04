@@ -34,23 +34,25 @@ html, body { height: 100%; background: var(--bg); color: var(--fg); font-family:
 .book-card .book-author { font-size: 0.75rem; color: #888; }
 
 /* Reader */
-#chapter-container { flex: 1; overflow: hidden; position: relative; }
+#chapter-container { flex: 1; overflow: hidden; position: relative; display: flex; flex-direction: column; justify-content: center; }
 .chapter-content {
   column-width: 100vw;
   column-gap: 0;
-  height: calc(100vh - var(--bar-h));
-  overflow: hidden;
+  height: min(calc(100vh - var(--bar-h)), 58rem); /* ~28 lines at 1.1rem/1.8lh + padding */
   transition: transform 0.2s ease;
-  padding: 24px 28px;
+  will-change: transform;
+}
+.chapter-inner {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 24px 32px;
   line-height: 1.8;
   font-size: 1.05rem;
   font-family: var(--reader-font);
-  will-change: transform;
 }
-/* Image overflow fix (security fix #4): strip EPUB stylesheets means we
-   must enforce max-width here or images bleed into adjacent columns/pages. */
-.chapter-content img { max-width: 100%; height: auto; display: block; margin: 1em auto; }
-.chapter-content * { max-width: 100%; }
+/* Image overflow fix: enforce max-width so images don't bleed into adjacent columns. */
+.chapter-inner img { max-width: 100%; height: auto; display: block; margin: 1em auto; }
+.chapter-inner * { max-width: 100%; }
 
 span.w { cursor: pointer; border-radius: 2px; transition: background 0.1s; -webkit-tap-highlight-color: transparent; }
 span.w:hover { background: rgba(92,122,92,0.15); }

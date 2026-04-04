@@ -231,8 +231,11 @@ async function loadChapter(index, initialPage = 0) {
 
   const content = document.createElement('div');
   content.className = 'chapter-content';
-  // Content comes from server's pre-sanitized chapter endpoint
-  content.innerHTML = html;
+  // Wrap in inner div so padding/centering doesn't affect column-width calculation
+  const inner = document.createElement('div');
+  inner.className = 'chapter-inner';
+  inner.innerHTML = html;
+  content.appendChild(inner);
   container.appendChild(content);
 
   requestAnimationFrame(() => {
