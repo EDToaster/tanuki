@@ -3,6 +3,7 @@ import xml.etree.ElementTree as ET
 import xml.etree.ElementTree as ET2  # alias for NIKL XML parsing
 import urllib.request
 import urllib.parse
+import jieba
 from abc import ABC, abstractmethod
 from typing import Optional
 from pathlib import Path
@@ -319,6 +320,144 @@ _CJK_RE = re.compile(
     r'\uac00-\ud7a3]'
 )
 
+# ── Segmenter interface + implementations ─────────────────────────────────────
+
+jieba.initialize()  # pre-load trie at startup
+
+
+class Segmenter(ABC):
+    @abstractmethod
+    def segment(self, text: str) -> list[tuple[str, str | None]]:
+        """
+        Returns list of (word, lookup_term) pairs.
+        - word: the display string
+        - lookup_term: the dictionary key. If == word, no data-lookup attr needed.
+                       If None, the token is non-word content and should be emitted
+                       as plain text without a <span>.
+        """
+        ...
+
+
+class JiebaSegmenter(Segmenter):
+    def segment(self, text: str) -> list[tuple[str, str | None]]:
+        result = []
+        for token in jieba.cut(text):
+            if not token:
+                continue
+            if _CJK_RE.search(token):
+                result.append((token, token))
+            else:
+                result.append((token, None))
+        return result
+
+
+_JOSA_LIST = sorted([
+    '에서', '에게', '으로', '부터', '까지', '처럼', '보다',
+    '한테', '이라', '이다', '로', '에', '의', '도', '만',
+    '와', '과', '이', '가', '을', '를', '은', '는',
+    '들이', '들은', '들을', '들의', '들도', '들만',
+], key=len, reverse=True)
+
+
+class KoreanJosaSegmenter(Segmenter):
+    def segment(self, text: str) -> list[tuple[str, str | None]]:
+        tokens = text.split(' ')
+        result = []
+        for i, token in enumerate(tokens):
+            if i > 0:
+                result.append((' ', None))
+            if not token:
+                continue
+            if not _CJK_RE.search(token):
+                result.append((token, token))
+                continue
+            stem = token
+            for josa in _JOSA_LIST:
+                if token.endswith(josa) and len(token) > len(josa):
+                    stem = token[:-len(josa)]
+                    break
+            result.append((token, stem))
+        return result
+
+
+class WhitespaceSegmenter(Segmenter):
+    def segment(self, text: str) -> list[tuple[str, str | None]]:
+        tokens = text.split(' ')
+        result = []
+        for i, token in enumerate(tokens):
+            if i > 0:
+                result.append((' ', None))
+            if token:
+                result.append((token, token))
+        return result
+
+
+SEGMENTERS: dict[str, Segmenter] = {
+    'zh':    JiebaSegmenter(),
+    'zh-TW': JiebaSegmenter(),
+    'zh-HK': JiebaSegmenter(),
+    'ko':    KoreanJosaSegmenter(),
+}
+
+
+def get_segmenter(lang: str) -> Segmenter:
+    return SEGMENTERS.get(lang, WhitespaceSegmenter())
+
+
+def _tokens_to_html(tokens: list[tuple[str, str | None]]) -> str:
+    parts = []
+    for word, lookup in tokens:
+        if lookup is None:
+            parts.append(word)
+        elif len(word) == 1:
+            # Single character — no data-lookup needed; innerText is the lookup
+            parts.append(f'<span class="w">{word}</span>')
+        else:
+            # Multi-char token — always set data-lookup (even if word == lookup)
+            # so the frontend doesn't have to rely on innerText for compounds
+            parts.append(f'<span class="w" data-lookup="{lookup}">{word}</span>')
+    return ''.join(parts)
+
+
+def wrap_with_segmenter(html: str, language: str) -> str:
+    segmenter = get_segmenter(language)
+    soup = BeautifulSoup(html, 'lxml')
+
+    # First pass: wrap <ruby> elements as single units
+    for ruby in soup.find_all('ruby'):
+        base_text = ''.join(
+            node for node in ruby.strings
+            if node.parent.name not in ('rt', 'rp', 'rtc')
+        ).strip()
+        wrapper = soup.new_tag('span', **{'class': 'w'})
+        if base_text:
+            wrapper['data-lookup'] = base_text
+        ruby.wrap(wrapper)
+
+    # Second pass: process leaf text nodes outside ruby
+    for node in soup.find_all(string=True):
+        parent = node.parent
+        if not parent:
+            continue
+        if parent.name in ('script', 'style', 'span'):
+            continue
+        if parent.name == 'ruby' or any(p.name == 'ruby' for p in parent.parents):
+            continue
+
+        text = str(node)
+        if not text.strip():
+            continue
+
+        tokens = segmenter.segment(text)
+        new_html = _tokens_to_html(tokens)
+        if new_html != text:
+            new_soup = BeautifulSoup(new_html, 'lxml')
+            new_nodes = list(new_soup.body.children)
+            node.replace_with(*[n.extract() for n in new_nodes])
+
+    body = soup.find('body')
+    return body.decode_contents() if body else str(soup)
+
 
 def _sanitize_html(soup: BeautifulSoup) -> None:
     for tag in soup.find_all(['script', 'style']):
@@ -404,7 +543,7 @@ def chapter(book_id, index):
         abort(404)
     meta = parse_epub_metadata(data)
     lang = meta['language']
-    wrapped = wrap_cjk(content, lang)
+    wrapped = wrap_with_segmenter(content, lang)
     fragment = f'<article data-lang="{lang}">{wrapped}</article>'
     return Response(fragment, mimetype='text/html; charset=utf-8')
 

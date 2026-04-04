@@ -1,6 +1,11 @@
 import zipfile, io, json, pytest
 from unittest.mock import patch
-from server import parse_epub_metadata, get_chapter_paths, _validate_book_id, validate_profile_name, normalize_html
+from server import (
+    parse_epub_metadata, get_chapter_paths, _validate_book_id,
+    validate_profile_name, normalize_html,
+    get_segmenter, JiebaSegmenter, KoreanJosaSegmenter, WhitespaceSegmenter,
+    wrap_with_segmenter,
+)
 
 
 # ── EPUB fixture factory ──────────────────────────────────────────────────────
@@ -175,7 +180,8 @@ def test_chapter_wraps_cjk_for_chinese(client, tmp_path):
     (tmp_path / 'mybook.epub').write_bytes(epub_data)
     with patch('server.BOOKS_DIR', str(tmp_path)):
         r = client.get('/book/mybook/chapter/0')
-    assert '<span class="w">' in r.data.decode()
+    # Chapter content has 你好 which jieba segments as a 2-char compound
+    assert '<span class="w"' in r.data.decode()
 
 
 # ── Phase 5: DB init ──────────────────────────────────────────────────────────
@@ -561,3 +567,102 @@ def test_api_dict_endpoint_returns_not_found(client):
 def test_api_dict_endpoint_requires_word_param(client):
     r = client.get('/api/dict?lang=zh')
     assert r.status_code == 400
+
+
+# ── Segmenter interface ────────────────────────────────────────────────────────
+
+def test_get_segmenter_zh_returns_jieba():
+    assert isinstance(get_segmenter('zh'), JiebaSegmenter)
+
+def test_get_segmenter_zh_tw_returns_jieba():
+    assert isinstance(get_segmenter('zh-TW'), JiebaSegmenter)
+
+def test_get_segmenter_ko_returns_korean():
+    assert isinstance(get_segmenter('ko'), KoreanJosaSegmenter)
+
+def test_get_segmenter_unknown_returns_whitespace():
+    assert isinstance(get_segmenter('fr'), WhitespaceSegmenter)
+
+def test_jieba_segmenter_returns_word_pairs():
+    seg = JiebaSegmenter()
+    tokens = seg.segment('中文')
+    words = [w for w, _ in tokens]
+    assert '中文' in words
+
+def test_jieba_segmenter_non_cjk_returns_none_lookup():
+    seg = JiebaSegmenter()
+    tokens = seg.segment('hello')
+    for word, lookup in tokens:
+        if word == 'hello':
+            assert lookup is None
+
+def test_jieba_segmenter_cjk_sets_lookup():
+    seg = JiebaSegmenter()
+    tokens = seg.segment('电话')
+    assert any(w == '电话' for w, _ in tokens)
+
+def test_korean_josa_segmenter_strips_particle():
+    seg = KoreanJosaSegmenter()
+    tokens = seg.segment('학교에서')
+    assert len(tokens) == 1
+    word, lookup = tokens[0]
+    assert word == '학교에서'
+    assert lookup == '학교'
+
+def test_korean_josa_segmenter_bare_noun_lookup_equals_word():
+    seg = KoreanJosaSegmenter()
+    tokens = seg.segment('학교')
+    word, lookup = tokens[0]
+    assert word == '학교'
+    assert lookup == '학교'
+
+def test_whitespace_segmenter_splits_on_spaces():
+    seg = WhitespaceSegmenter()
+    tokens = seg.segment('hello world')
+    assert ('hello', 'hello') in tokens
+    assert ('world', 'world') in tokens
+
+
+# ── wrap_with_segmenter ────────────────────────────────────────────────────────
+
+def test_wrap_chinese_uses_jieba():
+    result = wrap_with_segmenter('<p>中文学习</p>', 'zh')
+    assert '<span class="w"' in result
+    assert '<span class="w">中</span><span class="w">文</span>' not in result
+
+def test_wrap_chinese_multi_char_has_data_lookup():
+    result = wrap_with_segmenter('<p>电话</p>', 'zh')
+    assert 'data-lookup="电话"' in result
+
+def test_wrap_chinese_single_char_no_data_lookup():
+    result = wrap_with_segmenter('<p>我</p>', 'zh')
+    assert '<span class="w">我</span>' in result
+    assert 'data-lookup="我"' not in result
+
+def test_wrap_korean_strips_josa():
+    result = wrap_with_segmenter('<p>학교에서</p>', 'ko')
+    assert 'data-lookup="학교"' in result
+    assert '학교에서' in result
+
+def test_wrap_korean_bare_noun_has_data_lookup():
+    # Multi-char bare noun: word == lookup, but data-lookup is still set
+    # because the multi-char rule always emits data-lookup for len > 1
+    result = wrap_with_segmenter('<p>학교</p>', 'ko')
+    assert 'data-lookup="학교"' in result
+    assert '학교' in result
+
+def test_wrap_preserves_non_cjk_as_plain_text():
+    result = wrap_with_segmenter('<p>Hello, 世界!</p>', 'zh')
+    assert 'Hello,' in result
+    assert '<span class="w"' in result
+
+def test_wrap_does_not_break_ruby():
+    result = wrap_with_segmenter('<ruby>漢<rt>かん</rt>字<rt>じ</rt></ruby>', 'ja')
+    assert '<ruby>' in result
+    assert '<rt>' in result
+    assert '<span class="w">漢</span>' not in result
+
+def test_wrap_preserves_existing_tags():
+    result = wrap_with_segmenter('<p><strong>中文</strong></p>', 'zh')
+    assert '<strong>' in result
+    assert '<span class="w"' in result
