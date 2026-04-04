@@ -754,12 +754,38 @@ pytest tests/ -v
 
 Expected: all PASS
 
-**Step 2: Integration test with real NIKL key (optional)**
+**Step 2: Smoke test with real EPUBs**
 
 ```bash
-NIKL_API_KEY=your-32-hex-key python server.py
-# Tap a Korean word — should see KRDICT result with Korean pronunciation
-# Tap a Chinese word — should see Wiktionary result
+cp ../../fixtures/sample-zh.epub books/
+cp ../../fixtures/sample-ko.epub books/
+python server.py
+```
+
+Open `http://localhost:8090` and verify:
+
+- **`sample-zh.epub`** — tap a single Chinese character (e.g. 的, 我, 是); popup appears with pinyin romanisation and at least one definition sourced from Wiktionary. Check the Network tab: request goes to `/api/dict?word=的&lang=zh`, not directly to `en.wiktionary.org`.
+- **`sample-ko.epub`** (Wiktionary-only, no API key) — tap a Korean eojeol; popup appears. The Network tab shows `/api/dict?word=학교&lang=ko` (the stripped stem, not the full eojeol). Wiktionary result may be sparse — this is expected without NIKL.
+- **`sample-ko.epub`** (with NIKL key) — set the env var and restart:
+
+```bash
+NIKL_API_KEY=your-key python server.py
+# Tap a Korean noun — popup should show NIKL result with Korean pronunciation
+# Tap a word with no NIKL entry — should fall back to Wiktionary result
+# Source label in the popup ("Open in KRDICT ↗" vs "Open in Wiktionary ↗") switches accordingly
+```
+
+- **Curl sanity checks:**
+
+```bash
+curl "http://localhost:8090/api/dict?word=電話&lang=zh"
+# → { "word": "電話", "readings": [...], "definitions": [...], "source": "wiktionary", ... }
+
+curl "http://localhost:8090/api/dict?word=학교&lang=ko"
+# → { "word": "학교", "readings": [...], "definitions": [...], "source": "nikl"|"wiktionary", ... }
+
+curl "http://localhost:8090/api/dict?word=zzznope&lang=zh"
+# → { "not_found": true }
 ```
 
 **Step 3: Commit**

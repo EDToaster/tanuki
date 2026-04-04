@@ -421,6 +421,71 @@ git commit -m "feat: Docker Compose + Caddy entries, remove Kavita and Calibre-W
 
 ---
 
+### Task 7: Final smoke test — full system with real EPUBs
+
+This is the acceptance test for the complete reader. Run with all fixtures.
+
+```bash
+cp ../../fixtures/sample-zh.epub books/
+cp ../../fixtures/sample-ko.epub books/
+cp ../../fixtures/sample-en.epub books/
+NIKL_API_KEY=your-key python server.py
+```
+
+**Caching:**
+
+```bash
+# Cold load — first /library request parses all EPUBs:
+time curl -s http://localhost:8090/library > /dev/null
+
+# Warm load — should be significantly faster (cache hit):
+time curl -s http://localhost:8090/library > /dev/null
+# Expected: warm < 10ms, cold varies by library size
+```
+
+**Chapter lookahead:**
+
+- Open `sample-zh.epub` and navigate to chapter 1. In the Network tab, confirm silent prefetch requests appear for chapters 2–6 without any user action.
+- Navigate to chapter 3 — it loads instantly (no network request, served from `chapterCache`).
+
+**Dictionary cache:**
+
+- Tap the same Chinese character twice. The Network tab should show only one `/api/dict` request — the second tap is served from `dictCache`.
+
+**Error handling:**
+
+```bash
+# Malformed epub ID → 400:
+curl -I "http://localhost:8090/book/../etc/passwd/chapter/0"
+
+# Unknown book → 404:
+curl -I "http://localhost:8090/book/does-not-exist/chapter/0"
+
+# Out-of-range chapter → 404:
+curl -I "http://localhost:8090/book/sample-zh/chapter/9999"
+```
+
+**Full end-to-end with Docker:**
+
+```bash
+docker build -t ebook-reader .
+docker run -p 8090:8090 \
+  -v $(pwd)/books:/books:ro \
+  -v $(pwd)/data:/data \
+  -e NIKL_API_KEY=your-key \
+  ebook-reader
+# Repeat the smoke tests above at http://localhost:8090
+# Verify progress.db is created in ./data/ on the host
+```
+
+**Commit:**
+
+```bash
+git commit -m "chore: verified Phase 6 complete — reader is production-ready"
+```
+
+---
+
 ### Summary
 
 After Phase 6, the reader is complete:

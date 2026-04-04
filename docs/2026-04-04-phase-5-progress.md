@@ -676,6 +676,40 @@ git commit -m "feat: add writable /data volume for progress.db persistence"
 
 ---
 
+### Task 8: Smoke test — profiles and progress with real EPUBs
+
+```bash
+cp ../../fixtures/sample-zh.epub books/
+cp ../../fixtures/sample-ko.epub books/
+python server.py
+```
+
+Open `http://localhost:8090` in two different browsers (e.g. Chrome and Safari) and verify:
+
+- **Profile picker** — first visit shows the picker. Create two profiles (e.g. `howard` and `alice`). Each browser navigates to its own `/u/{name}/` URL.
+- **Progress save** — in Chrome as `howard`, open `sample-zh.epub` and read several pages. In Safari as `alice`, open `sample-ko.epub` and read a few pages.
+- **Cross-device sync** — open a third browser tab as `howard` at `/u/howard/`. Open `sample-zh.epub` — it should resume at the chapter and page where Chrome left off (progress badge visible in library, restore prompt in reader).
+- **Isolation** — `alice`'s progress is not visible under `howard` and vice versa.
+- **Offline fallback** — stop the server. Open Chrome (still on the reader page) and advance one page. Restart the server and check `GET /api/u/howard/progress/sample-zh` — the position should match what the reader shows (dual-write localStorage caught the offline write).
+- **Start over** — in the restore banner, tap "Start over". Confirm `GET /api/u/howard/progress/sample-zh` returns 404 and the book opens at chapter 0 page 0.
+
+```bash
+# API sanity checks:
+curl http://localhost:8090/api/profiles
+# → [{"name":"howard",...}, {"name":"alice",...}]
+
+curl http://localhost:8090/api/u/howard/progress
+# → [{"book_id":"sample-zh","chapter_id":N,"page_index":M,...}]
+```
+
+**Commit:**
+
+```bash
+git commit -m "chore: verified Phase 5 complete — profiles and reading progress"
+```
+
+---
+
 ### Summary
 
 After Phase 5, the reader has:

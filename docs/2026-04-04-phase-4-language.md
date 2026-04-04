@@ -485,17 +485,26 @@ pytest tests/ -v
 
 Expected: all PASS
 
-**Step 3: Verify in browser**
+**Step 3: Verify in browser with real EPUBs**
 
 ```bash
+cp ../../fixtures/sample-zh.epub books/
+cp ../../fixtures/sample-ko.epub books/
 python server.py
-# Open a Chinese book:
-# - Tap 中文 (if jieba segments it as a word) — popup title should show 中文
-# - Tap single char 的 — popup title shows 的
+```
 
-# Open a Korean book:
-# - Tap 학교에서 — popup lookup should be 학교 (not 학교에서)
-# - Check the developer tools Network tab: /api/dict?word=학교
+Open `http://localhost:8090` and verify:
+
+- **`sample-zh.epub`** — open any prose chapter; inspect the HTML source (or DevTools element picker): multi-character words like 中文, 电话, 图书馆 should each be a single `<span class="w" data-lookup="中文">中文</span>`, not split into individual character spans. Single-char words like 的, 我 should be `<span class="w">的</span>` with no `data-lookup`. Tapping a multi-char span sends the full word to `/api/dict`, not individual characters.
+- **`sample-ko.epub`** — open a chapter; each space-delimited eojeol is one span. Tap 학교에서 — the Network tab shows the request as `/api/dict?word=학교&lang=ko` (particle stripped), not `학교에서`.
+
+**Step 3b: Performance check**
+
+```bash
+# Time jieba preprocessing on a real Chinese chapter:
+time curl -s "http://localhost:8090/book/sample-zh/chapter/0" > /dev/null
+# Expected: 50–150ms total. If >300ms, check that jieba.initialize()
+# was called at startup (not lazily on first request).
 ```
 
 **Step 4: Commit**
@@ -520,8 +529,8 @@ Expected: all PASS
 **Step 2: Performance check**
 
 ```bash
-# Time a chapter request for a Chinese book:
-time curl -s http://localhost:8090/book/your-book/chapter/0 > /dev/null
+# Time a chapter request for a real Chinese book:
+time curl -s http://localhost:8090/book/sample-zh/chapter/0 > /dev/null
 # Expected: 50–150ms total (jieba contributes ~15–50ms)
 ```
 

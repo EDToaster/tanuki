@@ -2,3 +2,7 @@
 .claude
 CLAUDE.local.md
 .mcp.json
+
+# Test fixtures — populate locally, never commit EPUBs
+fixtures/*.epub
+fixtures/*.mobi

@@ -646,13 +646,23 @@ pytest tests/ -v
 
 Expected: all PASS
 
-**Step 2: Test with real illustrated EPUB**
+**Step 2: Smoke test with real EPUBs**
 
 ```bash
+cp ../../fixtures/sample-zh.epub books/
+cp ../../fixtures/sample-ko.epub books/
+cp ../../fixtures/sample-en.epub books/
 python server.py
-# Open a book with inline images — verify images render within columns (not overflowing)
-# Verify dark mode appearance with OS setting
 ```
+
+Open `http://localhost:8090` and verify for each book:
+
+- **Consistent typography** — all three books use the same serif font stack regardless of publisher CSS; no font-size or color overrides from the EPUB survive
+- **`sample-en.epub`** — if the EPUB has inline images, they stay within the column (not wider than the viewport); no images bleed into adjacent pages
+- **`sample-zh.epub`** — no inline `style="font-family:..."` or `style="color:..."` artifacts visible; CJK text justified correctly (`text-justify: inter-character`)
+- **`sample-ko.epub`** — Korean eojeols do not break mid-word across lines (`word-break: keep-all` is working)
+- **Dark mode** — toggle OS dark mode; background switches to dark, text to light, no harsh contrast artifacts
+- **View source on a chapter** — inspect the raw HTML returned by `/book/{id}/chapter/0`; confirm no `<script>` tags, no `on*` attributes, no `style="..."` beyond the allowlist properties
 
 **Step 3: Commit**
 

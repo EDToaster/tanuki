@@ -1263,25 +1263,33 @@ pytest tests/ -v
 
 Expected: all PASS
 
-**Step 2: Smoke test with a real EPUB**
+**Step 2: Smoke test with real EPUBs**
+
+Copy the fixture EPUBs into the `books/` directory:
 
 ```bash
-# Put any epub in books/ and run:
+cp ../../fixtures/sample-zh.epub books/
+cp ../../fixtures/sample-ko.epub books/
+cp ../../fixtures/sample-en.epub books/
 python server.py
-# Verify:
-# - /library lists the book
-# - /book/{id}/cover serves an image (or placeholder)
-# - Chapters paginate correctly
-# - Tapping a CJK character opens the dictionary popup
-# - Network failure in Wiktionary shows "Network error" not a crash
 ```
+
+Open `http://localhost:8090` and verify:
+
+- All three books appear in the library grid with covers and correct titles/authors
+- `sample-en.epub` — open any chapter, confirm pagination works (swipe/arrow keys advance pages, status bar updates)
+- `sample-zh.epub` — open a chapter, confirm every Chinese character is wrapped in a tappable span; tapping opens the dictionary popup with pinyin and definitions
+- `sample-ko.epub` — open a chapter, confirm Korean eojeols are tappable; the Network tab shows `/api/dict?word=...&lang=ko`
+- Disconnect from the internet, tap any word — popup shows "Network error — check connection" (not a blank popup or crash)
 
 **Step 3: Build Docker image**
 
 ```bash
 docker build -t ebook-reader .
-docker run -p 8090:8090 -v $(pwd)/books:/books ebook-reader
-# Verify same smoke test at http://localhost:8090
+docker run -p 8090:8090 \
+  -v $(pwd)/books:/books \
+  ebook-reader
+# Repeat smoke test at http://localhost:8090
 ```
 
 **Step 4: Final commit**
