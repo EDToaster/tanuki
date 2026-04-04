@@ -71,6 +71,37 @@ span.w.active { background: rgba(92,122,92,0.3); }
 #lookup-pill { position: fixed; background: var(--fg); color: white; padding: 6px 14px; border-radius: 20px; font-size: 0.85rem; cursor: pointer; z-index: 99; display: none; }
 #lookup-pill.visible { display: block; }
 
+/* App container */
+#app { height: 100vh; }
+
+/* Library view */
+.library-view { height: 100vh; overflow-y: auto; }
+.empty-state { padding: 16px; color: #888; }
+
+/* Profile picker */
+.picker-screen {
+  display: flex; flex-direction: column; align-items: center;
+  justify-content: center; height: 100vh; gap: 2rem;
+}
+.picker-grid { display: flex; gap: 1rem; flex-wrap: wrap; justify-content: center; }
+.profile-btn {
+  padding: 1rem 2rem; font-size: 1.1rem; border-radius: 8px;
+  border: 2px solid #ccc; cursor: pointer; background: none;
+}
+.profile-btn:hover { border-color: #666; background: #f5f5f5; }
+.new-profile-btn {
+  padding: 0.75rem 1.5rem; font-size: 1rem; border-radius: 8px;
+  border: 2px dashed #aaa; cursor: pointer; background: none; color: #666;
+}
+
+/* Continue reading badge */
+.continue-badge {
+  position: absolute; bottom: 6px; left: 6px;
+  background: rgba(0,0,0,0.65); color: #fff;
+  font-size: 0.7rem; padding: 2px 6px; border-radius: 4px;
+  pointer-events: none;
+}
+
 /* Dark mode */
 @media (prefers-color-scheme: dark) {
   :root { --bg: #1c1c1e; --fg: #e8e6e3; --accent: #7aaf7a; }
