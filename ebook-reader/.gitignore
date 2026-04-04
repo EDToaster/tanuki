@@ -5,3 +5,5 @@ venv/
 books/
 *.epub
 *.db
+*.db-shm
+*.db-wal
