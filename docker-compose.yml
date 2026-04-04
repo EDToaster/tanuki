@@ -1,0 +1,15 @@
+version: "3.8"
+
+services:
+  ebook-reader:
+    build: ./ebook-reader
+    container_name: ebook-reader
+    volumes:
+      - /media/books:/books:ro
+      - /data/ebook-reader:/data
+    ports:
+      - "8090:8090"
+    restart: unless-stopped
+    environment:
+      - BOOKS_DIR=/books
+      - DB_PATH=/data/progress.db

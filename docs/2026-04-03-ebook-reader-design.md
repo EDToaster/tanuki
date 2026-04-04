@@ -37,7 +37,7 @@ Primary use case: read foreign-language books, tap individual characters to see 
 
 ### Stack
 
-Python with the standard library (`http.server` or minimal FastAPI). No ORM, no database — EPUBs on disk are the source of truth.
+**Stack:** Python 3.12, Flask. No ORM, no database — EPUBs on disk are the source of truth.
 
 ### Endpoints
 

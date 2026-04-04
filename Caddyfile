@@ -1,0 +1,3 @@
+books.homelab.local {
+    reverse_proxy ebook-reader:8090
+}
