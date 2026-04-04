@@ -1,6 +1,6 @@
 import zipfile, io, json, pytest
 from unittest.mock import patch
-from server import parse_epub_metadata, get_chapter_paths, _validate_book_id
+from server import parse_epub_metadata, get_chapter_paths, _validate_book_id, validate_profile_name
 
 
 # ── EPUB fixture factory ──────────────────────────────────────────────────────
@@ -176,3 +176,115 @@ def test_chapter_wraps_cjk_for_chinese(client, tmp_path):
     with patch('server.BOOKS_DIR', str(tmp_path)):
         r = client.get('/book/mybook/chapter/0')
     assert '<span class="w">' in r.data.decode()
+
+
+# ── Phase 5: DB init ──────────────────────────────────────────────────────────
+
+def test_init_db_creates_tables(tmp_path, monkeypatch):
+    import server, sqlite3
+    db_path = str(tmp_path / 'progress.db')
+    monkeypatch.setattr(server, 'DB_PATH', db_path)
+    server.init_db()
+    con = sqlite3.connect(db_path)
+    tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    assert 'profiles' in tables
+    assert 'progress' in tables
+    con.close()
+
+def test_init_db_idempotent(tmp_path, monkeypatch):
+    import server
+    db_path = str(tmp_path / 'progress.db')
+    monkeypatch.setattr(server, 'DB_PATH', db_path)
+    server.init_db()
+    server.init_db()  # must not raise
+
+
+# ── Phase 5: Profile name validation ─────────────────────────────────────────
+
+def test_valid_profile_names():
+    for name in ['howard', 'Alice', 'user-1', 'user_2', 'A' * 32]:
+        assert validate_profile_name(name) is True
+
+def test_invalid_profile_names():
+    for name in ['', 'a' * 33, 'has space', 'has/slash', 'has.dot', '<script>']:
+        assert validate_profile_name(name) is False
+
+
+# ── Phase 5: Profile endpoints ────────────────────────────────────────────────
+
+def test_list_profiles_empty(client):
+    r = client.get('/api/profiles')
+    assert r.status_code == 200
+    assert r.get_json() == []
+
+def test_create_profile(client):
+    r = client.post('/api/profiles', json={'name': 'howard'})
+    assert r.status_code == 201
+    data = r.get_json()
+    assert data['name'] == 'howard'
+    assert 'created_at' in data
+
+def test_create_profile_duplicate_409(client):
+    client.post('/api/profiles', json={'name': 'howard'})
+    r = client.post('/api/profiles', json={'name': 'howard'})
+    assert r.status_code == 409
+
+def test_create_profile_invalid_name_400(client):
+    r = client.post('/api/profiles', json={'name': 'bad name!'})
+    assert r.status_code == 400
+
+def test_delete_profile(client):
+    client.post('/api/profiles', json={'name': 'howard'})
+    r = client.delete('/api/profiles/howard')
+    assert r.status_code == 204
+
+def test_delete_profile_not_found(client):
+    r = client.delete('/api/profiles/nobody')
+    assert r.status_code == 404
+
+
+# ── Phase 5: Progress endpoints ───────────────────────────────────────────────
+
+def test_get_all_progress_empty(client):
+    client.post('/api/profiles', json={'name': 'howard'})
+    r = client.get('/api/u/howard/progress')
+    assert r.status_code == 200
+    assert r.get_json() == []
+
+def test_get_all_progress_unknown_profile(client):
+    r = client.get('/api/u/nobody/progress')
+    assert r.status_code == 404
+
+def test_put_and_get_progress(client):
+    client.post('/api/profiles', json={'name': 'howard'})
+    r = client.put('/api/u/howard/progress/three-body',
+                   json={'chapter_id': 4, 'page_index': 2})
+    assert r.status_code == 200
+    data = r.get_json()
+    assert data['chapter_id'] == 4
+    assert data['page_index'] == 2
+
+def test_put_progress_upserts(client):
+    client.post('/api/profiles', json={'name': 'howard'})
+    client.put('/api/u/howard/progress/three-body', json={'chapter_id': 4, 'page_index': 2})
+    client.put('/api/u/howard/progress/three-body', json={'chapter_id': 5, 'page_index': 0})
+    r = client.get('/api/u/howard/progress/three-body')
+    assert r.get_json()['chapter_id'] == 5
+
+def test_put_progress_autocreates_profile(client):
+    r = client.put('/api/u/newuser/progress/three-body',
+                   json={'chapter_id': 1, 'page_index': 0})
+    assert r.status_code == 200
+
+def test_delete_progress(client):
+    client.post('/api/profiles', json={'name': 'howard'})
+    client.put('/api/u/howard/progress/three-body', json={'chapter_id': 4, 'page_index': 2})
+    r = client.delete('/api/u/howard/progress/three-body')
+    assert r.status_code == 204
+    r2 = client.get('/api/u/howard/progress/three-body')
+    assert r2.status_code == 404
+
+def test_put_progress_invalid_body(client):
+    client.post('/api/profiles', json={'name': 'howard'})
+    r = client.put('/api/u/howard/progress/three-body', json={'chapter_id': 'bad'})
+    assert r.status_code == 400
