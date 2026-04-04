@@ -1,5 +1,10 @@
-import zipfile, io, os, re, base64, sqlite3, datetime, mimetypes, posixpath
+import zipfile, io, os, re, base64, sqlite3, datetime, mimetypes, posixpath, json
 import xml.etree.ElementTree as ET
+import xml.etree.ElementTree as ET2  # alias for NIKL XML parsing
+import urllib.request
+import urllib.parse
+from abc import ABC, abstractmethod
+from typing import Optional
 from pathlib import Path
 from flask import Flask, jsonify, Response, send_file, send_from_directory, abort, request
 from bs4 import BeautifulSoup, NavigableString
@@ -402,6 +407,258 @@ def chapter(book_id, index):
     wrapped = wrap_cjk(content, lang)
     fragment = f'<article data-lang="{lang}">{wrapped}</article>'
     return Response(fragment, mimetype='text/html; charset=utf-8')
+
+
+# ── Dictionary infrastructure ─────────────────────────────────────────────────
+
+def normalize_dict_response(entry: dict) -> dict:
+    return {
+        'word': entry.get('word', ''),
+        'readings': entry.get('readings', []),
+        'definitions': entry.get('definitions', []),
+        'source': entry.get('source', ''),
+        'source_url': entry.get('source_url', None),
+        'not_found': bool(entry.get('not_found', False)),
+    }
+
+
+def not_found_response(word: str) -> dict:
+    return normalize_dict_response({
+        'word': word,
+        'readings': [],
+        'definitions': [],
+        'source': '',
+        'source_url': None,
+        'not_found': True,
+    })
+
+
+class DictProvider(ABC):
+    name: str = ''
+
+    @abstractmethod
+    def lookup(self, word: str, lang: str = '*') -> Optional[dict]:
+        """Return normalized entry dict or None if not found."""
+        ...
+
+
+class WiktionaryProvider(DictProvider):
+    name = 'wiktionary'
+    _LANG_SECTIONS = {'zh': 'Chinese', 'ko': 'Korean', 'ja': 'Japanese'}
+
+    def lookup(self, word: str, lang: str = '*') -> Optional[dict]:
+        url = (
+            'https://en.wiktionary.org/w/api.php?action=parse'
+            f'&page={urllib.parse.quote(word)}&prop=text&format=json'
+        )
+        try:
+            with urllib.request.urlopen(url, timeout=5) as resp:
+                data = json.loads(resp.read())
+        except Exception:
+            return None
+
+        if 'error' in data or 'parse' not in data:
+            return None
+
+        raw_html = data['parse']['text']['*']
+        doc = BeautifulSoup(raw_html, 'lxml')
+
+        target_section_name = self._LANG_SECTIONS.get(lang, '')
+        lang_heading = None
+        if target_section_name:
+            for h2 in doc.find_all('h2'):
+                if target_section_name in h2.get_text():
+                    lang_heading = h2
+                    break
+
+        root = lang_heading.parent if lang_heading else doc
+
+        pronunciation = ''
+        pron_el = root.find(class_=['IPA', 'pinyin'])
+        if pron_el:
+            pronunciation = pron_el.get_text().strip()
+
+        definitions = []
+        for li in root.select('ol li'):
+            text = li.get_text(' ', strip=True)
+            if text and len(text) > 1 and not text.startswith('['):
+                definitions.append({'pos': None, 'text': text})
+            if len(definitions) >= 5:
+                break
+
+        if not definitions:
+            return None
+
+        readings = []
+        if pronunciation:
+            readings.append({'text': pronunciation, 'romanization': None})
+
+        source_url = f'https://en.wiktionary.org/wiki/{urllib.parse.quote(word)}'
+        return normalize_dict_response({
+            'word': word,
+            'readings': readings,
+            'definitions': definitions,
+            'source': 'wiktionary',
+            'source_url': source_url,
+            'not_found': False,
+        })
+
+
+_NIKL_POS_MAP = {
+    '명사': 'noun', '대명사': 'pronoun', '수사': 'numeral',
+    '동사': 'verb', '형용사': 'adjective', '관형사': 'determiner',
+    '부사': 'adverb', '감탄사': 'interjection', '조사': 'particle',
+    '의존명사': 'bound noun', '보조동사': 'auxiliary verb',
+    '보조형용사': 'auxiliary adjective',
+}
+
+
+def _romanize_hangul_simple(text: str) -> str:
+    return text  # stub; returns text as-is
+
+
+class NIKLProvider(DictProvider):
+    name = 'nikl'
+    _SEARCH_URL = 'https://krdict.korean.go.kr/api/search'
+
+    def __init__(self, api_key=None):
+        self._api_key = api_key
+        self._cache: dict = {}
+
+    def lookup(self, word: str, lang: str = 'ko') -> Optional[dict]:
+        if not self._api_key:
+            return None
+
+        cache_key = word.lower()
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+
+        params = urllib.parse.urlencode({
+            'key': self._api_key,
+            'q': word,
+            'num': '5',
+            'translated': 'y',
+            'trans_lang': '1',
+        })
+        url = f'{self._SEARCH_URL}?{params}'
+
+        try:
+            with urllib.request.urlopen(url, timeout=5) as resp:
+                xml_bytes = resp.read()
+        except Exception:
+            self._cache[cache_key] = None
+            return None
+
+        try:
+            root_el = ET2.fromstring(xml_bytes)
+        except ET2.ParseError:
+            self._cache[cache_key] = None
+            return None
+
+        items = root_el.findall('.//item')
+        if not items:
+            self._cache[cache_key] = None
+            return None
+
+        item = items[0]
+        headword = item.findtext('word', word)
+        pronunciation_text = item.findtext('pronunciation', '')
+        pos_ko = item.findtext('pos', '')
+        pos_en = _NIKL_POS_MAP.get(pos_ko, pos_ko.lower() if pos_ko else None)
+        source_url = item.findtext('link', '')
+
+        definitions = []
+        for sense in item.findall('sense'):
+            trans = sense.find('translation')
+            if trans is not None:
+                trans_word = trans.findtext('trans_word', '')
+                trans_dfn = trans.findtext('trans_dfn', '')
+                text_en = f'{trans_word}: {trans_dfn}'.strip(': ') if trans_word or trans_dfn else ''
+            else:
+                text_en = ''
+            text_ko = sense.findtext('definition', '')
+            if text_en or text_ko:
+                definitions.append({
+                    'pos': pos_en,
+                    'text': text_en or text_ko,
+                    'text_ko': text_ko if text_en else None,
+                })
+
+        readings = [{
+            'text': pronunciation_text or headword,
+            'romanization': _romanize_hangul_simple(pronunciation_text or headword),
+        }] if (pronunciation_text or headword) else []
+
+        result = normalize_dict_response({
+            'word': headword,
+            'readings': readings,
+            'definitions': definitions,
+            'source': 'nikl',
+            'source_url': source_url or None,
+            'not_found': False,
+        })
+        self._cache[cache_key] = result
+        return result
+
+
+_NIKL_API_KEY = os.environ.get('NIKL_API_KEY', None)
+_wiktionary = WiktionaryProvider()
+_nikl = NIKLProvider(api_key=_NIKL_API_KEY)
+
+PROVIDER_CHAINS: dict = {
+    'ko': [_nikl, _wiktionary],
+    'zh': [_wiktionary],
+    '*':  [_wiktionary],
+}
+
+_DICT_CACHE_PATH = os.environ.get('DICT_CACHE_PATH', '/tmp/dict_cache.json')
+
+
+def _load_disk_cache() -> dict:
+    try:
+        with open(_DICT_CACHE_PATH, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_disk_cache(cache: dict) -> None:
+    try:
+        with open(_DICT_CACHE_PATH, 'w', encoding='utf-8') as f:
+            json.dump(cache, f, ensure_ascii=False)
+    except OSError:
+        pass
+
+
+_DISK_CACHE: dict = _load_disk_cache()
+
+
+def _lookup_word(word: str, lang: str) -> dict:
+    cache_key = f'{lang}:{word}'
+    if cache_key in _DISK_CACHE:
+        return _DISK_CACHE[cache_key]
+
+    chain = PROVIDER_CHAINS.get(lang) or PROVIDER_CHAINS.get('*', [])
+    for provider in chain:
+        try:
+            result = provider.lookup(word, lang=lang)
+            if result is not None:
+                _DISK_CACHE[cache_key] = result
+                _save_disk_cache(_DISK_CACHE)
+                return result
+        except Exception:
+            continue
+    return not_found_response(word)
+
+
+@app.route('/api/dict')
+def dict_lookup():
+    word = request.args.get('word', '').strip()
+    lang = request.args.get('lang', '*').strip()
+    if not word:
+        abort(400)
+    result = _lookup_word(word, lang)
+    return jsonify(result)
 
 
 # ── Profile endpoints ─────────────────────────────────────────────────────────

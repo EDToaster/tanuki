@@ -314,73 +314,72 @@ document.getElementById('back-btn').addEventListener('click', () => {
   else navigate('/');
 });
 
-// ── Dictionary ────────────────────────────────────────────────────────────────
-// Phase 1: direct Wiktionary lookup. Phase 3 replaces this with /api/dict.
+// ── Dictionary ───────────────────────────────────────────────────────────────
 
 async function lookupWord(word) {
-  showPopup(word, null, null, null);
+  showPopup(word, null, null, null);  // loading state
 
-  const lang = state.current?.language ?? '';
-  const url = `https://en.wiktionary.org/w/api.php?action=parse&page=${encodeURIComponent(word)}&prop=text&format=json&origin=*`;
+  const lang = document.querySelector('article[data-lang]')?.dataset.lang
+             ?? state.current?.language ?? '*';
 
-  let pronunciation = '';
-  let definitions = [];
+  let result = null;
   let networkError = false;
 
   try {
-    const res = await fetch(url);
-    const data = await res.json();
-    if (data.error) throw new Error('not found');
-
-    const html = data.parse.text['*'];
-    const doc = new DOMParser().parseFromString(html, 'text/html');
-
-    const langMap = { zh: 'Chinese', ko: 'Korean' };
-    const targetLang = langMap[lang] ?? '';
-
-    let langSection = null;
-    doc.querySelectorAll('h2').forEach(h2 => {
-      if (h2.textContent.includes(targetLang)) langSection = h2;
-    });
-
-    const root = langSection ? langSection.parentElement : doc.body;
-    const pronEl = root.querySelector('.IPA, .pinyin, [class*="pron"]');
-    pronunciation = pronEl?.textContent?.trim() ?? '';
-
-    root.querySelectorAll('ol li').forEach(li => {
-      const text = li.childNodes[0]?.textContent?.trim();
-      if (text && text.length > 1) definitions.push(text);
-    });
-
-    if (!pronunciation && !definitions.length) throw new Error('no content');
+    const res = await fetch(
+      `/api/dict?word=${encodeURIComponent(word)}&lang=${encodeURIComponent(lang)}`
+    );
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    result = await res.json();
   } catch (e) {
-    if (e instanceof TypeError) networkError = true;
-    definitions = networkError
-      ? ['Network error — check connection.']
-      : ['No Wiktionary entry found.'];
+    networkError = true;
   }
 
-  const sourceUrl = `https://en.wiktionary.org/wiki/${encodeURIComponent(word)}`;
-  showPopup(word, pronunciation, definitions, sourceUrl);
+  if (networkError || !result) {
+    showPopup(word, '', ['Network error — check connection.'], null);
+    return;
+  }
+
+  if (result.not_found) {
+    showPopup(word, '', ['No dictionary entry found.'], null);
+    return;
+  }
+
+  const pronunciation = result.readings?.[0]?.text ?? '';
+  const definitions = (result.definitions ?? []).slice(0, 5).map(d => d.text);
+  const sourceLabel = result.source === 'nikl'
+    ? 'Open in KRDICT ↗'
+    : result.source === 'wiktionary'
+    ? 'Open in Wiktionary ↗'
+    : 'Open source ↗';
+  const sourceUrl = result.source_url;
+
+  showPopup(word, pronunciation, definitions, sourceUrl, sourceLabel);
 }
 
-function showPopup(word, pronunciation, definitions, sourceUrl) {
+function showPopup(word, pronunciation, definitions, sourceUrl, sourceLabel) {
   document.getElementById('popup-word').textContent = word;
-  document.getElementById('popup-pronunciation').textContent = pronunciation ?? 'Loading…';
+  document.getElementById('popup-pronunciation').textContent =
+    pronunciation !== null ? (pronunciation || '') : 'Loading…';
 
   const defEl = document.getElementById('popup-definitions');
   if (definitions === null) {
     defEl.innerHTML = '<em>Loading…</em>';
   } else {
-    defEl.innerHTML = definitions.length
-      ? '<ol>' + definitions.slice(0, 5).map(d => `<li>${d}</li>`).join('') + '</ol>'
-      : '';
+    const ol = document.createElement('ol');
+    (definitions || []).forEach(d => {
+      const li = document.createElement('li');
+      li.textContent = d;    // textContent — never innerHTML for external data
+      ol.appendChild(li);
+    });
+    defEl.innerHTML = '';
+    if (definitions.length) defEl.appendChild(ol);
   }
 
   const link = document.getElementById('popup-source-link');
   if (sourceUrl) {
     link.href = sourceUrl;
-    link.textContent = 'Open in Wiktionary ↗';
+    link.textContent = sourceLabel || 'Open source ↗';
     link.style.display = 'block';
   } else {
     link.style.display = 'none';

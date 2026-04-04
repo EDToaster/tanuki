@@ -406,3 +406,158 @@ def test_normalize_preserves_ruby():
     result = normalize_html(html, 'mybook', 'ja')
     assert '<ruby>' in result
     assert '<rt>' in result
+
+
+# ── Phase 3: dictionary ───────────────────────────────────────────────────────
+
+from unittest.mock import MagicMock
+from server import (
+    normalize_dict_response, not_found_response,
+    WiktionaryProvider, NIKLProvider, DictProvider, PROVIDER_CHAINS,
+)
+import urllib.request
+
+
+# ── normalize_dict_response ───────────────────────────────────────────────────
+
+def test_normalized_response_has_required_fields():
+    entry = {
+        'word': '学校',
+        'readings': [{'text': 'xuéxiào', 'romanization': 'xuéxiào'}],
+        'definitions': [{'pos': 'noun', 'text': 'school'}],
+        'source': 'wiktionary',
+        'source_url': 'https://en.wiktionary.org/wiki/学校',
+        'not_found': False,
+    }
+    result = normalize_dict_response(entry)
+    assert result['word'] == '学校'
+    assert result['not_found'] is False
+    assert isinstance(result['definitions'], list)
+
+def test_not_found_response():
+    result = not_found_response('nonexistentword')
+    assert result['not_found'] is True
+    assert result['word'] == 'nonexistentword'
+    assert result['definitions'] == []
+
+
+# ── WiktionaryProvider ────────────────────────────────────────────────────────
+
+MOCK_WIKTIONARY_HTML = '''
+<div>
+<h2><span class="mw-headline" id="Chinese">Chinese</span></h2>
+<div class="mw-parser-output">
+<span class="IPA">/xuě/</span>
+<ol><li>snow</li><li>to snow</li></ol>
+</div>
+</div>
+'''
+
+def test_wiktionary_provider_parses_definitions():
+    mock_response_data = json.dumps({
+        'parse': {'text': {'*': MOCK_WIKTIONARY_HTML}}
+    }).encode()
+    with patch('urllib.request.urlopen') as mock_urlopen:
+        mock_urlopen.return_value.__enter__ = lambda s: s
+        mock_urlopen.return_value.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value.read = lambda: mock_response_data
+        provider = WiktionaryProvider()
+        result = provider.lookup('雪', lang='zh')
+    assert result is not None
+    assert result['not_found'] is False
+    assert len(result['definitions']) > 0
+
+def test_wiktionary_provider_returns_none_on_error():
+    with patch('urllib.request.urlopen') as mock_urlopen:
+        mock_urlopen.side_effect = Exception('network error')
+        provider = WiktionaryProvider()
+        result = provider.lookup('雪', lang='zh')
+    assert result is None
+
+
+# ── NIKLProvider ──────────────────────────────────────────────────────────────
+
+MOCK_NIKL_XML = '''<?xml version="1.0" encoding="UTF-8"?>
+<channel>
+  <total>1</total>
+  <item>
+    <target_code>26655</target_code>
+    <word>나무</word>
+    <pronunciation>나무</pronunciation>
+    <pos>명사</pos>
+    <word_grade>초급</word_grade>
+    <sense>
+      <sense_order>1</sense_order>
+      <definition>단단한 줄기에 가지와 잎이 달린 식물.</definition>
+      <translation>
+        <trans_lang>1</trans_lang>
+        <trans_word>tree</trans_word>
+        <trans_dfn>A plant with a firm stem, branches, and leaves.</trans_dfn>
+      </translation>
+    </sense>
+    <link>https://krdict.korean.go.kr/dicSearch/search?mainSearchWord=나무</link>
+  </item>
+</channel>'''.encode('utf-8')
+
+def test_nikl_provider_parses_xml():
+    with patch('urllib.request.urlopen') as mock_urlopen:
+        mock_urlopen.return_value.__enter__ = lambda s: s
+        mock_urlopen.return_value.__exit__ = MagicMock(return_value=False)
+        mock_urlopen.return_value.read = lambda: MOCK_NIKL_XML
+        provider = NIKLProvider(api_key='test-key-32chars-padding0000000')
+        result = provider.lookup('나무', lang='ko')
+    assert result is not None
+    assert result['word'] == '나무'
+    assert result['not_found'] is False
+    assert any('tree' in d['text'] for d in result['definitions'])
+
+def test_nikl_provider_returns_none_without_api_key():
+    provider = NIKLProvider(api_key=None)
+    result = provider.lookup('나무', lang='ko')
+    assert result is None
+
+def test_nikl_provider_caches_results():
+    call_count = 0
+
+    def counting_urlopen(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        m = MagicMock()
+        m.__enter__ = lambda s: s
+        m.__exit__ = MagicMock(return_value=False)
+        m.read = lambda: MOCK_NIKL_XML
+        return m
+
+    provider = NIKLProvider(api_key='test-key-32chars-padding0000000')
+    provider._cache.clear()
+
+    with patch('urllib.request.urlopen', side_effect=counting_urlopen):
+        provider.lookup('나무', lang='ko')
+        provider.lookup('나무', lang='ko')
+
+    assert call_count == 1
+
+
+# ── /api/dict endpoint ────────────────────────────────────────────────────────
+
+def test_api_dict_endpoint_returns_json(client):
+    mock_result = {
+        'word': '中', 'readings': [], 'definitions': [{'pos': 'noun', 'text': 'test'}],
+        'source': 'mock', 'source_url': None, 'not_found': False,
+    }
+    with patch('server._lookup_word', return_value=mock_result):
+        r = client.get('/api/dict?word=%E4%B8%AD&lang=zh')
+    assert r.status_code == 200
+    data = json.loads(r.data)
+    assert data['word'] == '中'
+
+def test_api_dict_endpoint_returns_not_found(client):
+    with patch('server._lookup_word', return_value=not_found_response('zzz')):
+        r = client.get('/api/dict?word=zzz&lang=zh')
+    assert r.status_code == 200
+    data = json.loads(r.data)
+    assert data['not_found'] is True
+
+def test_api_dict_endpoint_requires_word_param(client):
+    r = client.get('/api/dict?lang=zh')
+    assert r.status_code == 400
