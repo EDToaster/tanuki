@@ -1,6 +1,6 @@
 import zipfile, io, json, pytest
 from unittest.mock import patch
-from server import parse_epub_metadata, get_chapter_paths, _validate_book_id, validate_profile_name
+from server import parse_epub_metadata, get_chapter_paths, _validate_book_id, validate_profile_name, normalize_html
 
 
 # ── EPUB fixture factory ──────────────────────────────────────────────────────
@@ -288,3 +288,121 @@ def test_put_progress_invalid_body(client):
     client.post('/api/profiles', json={'name': 'howard'})
     r = client.put('/api/u/howard/progress/three-body', json={'chapter_id': 'bad'})
     assert r.status_code == 400
+def make_epub_with_image(image_bytes=b'\x89PNG\r\n\x1a\n' + b'\x00' * 20):
+    """Build a minimal EPUB with an image in the manifest."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w') as z:
+        z.writestr('mimetype', 'application/epub+zip')
+        z.writestr('META-INF/container.xml', '''<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>''')
+        z.writestr('OEBPS/content.opf', '''<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>T</dc:title><dc:creator>A</dc:creator><dc:language>zh</dc:language>
+  </metadata>
+  <manifest>
+    <item id="c0" href="chapter0.xhtml" media-type="application/xhtml+xml"/>
+    <item id="img1" href="images/cover.png" media-type="image/png"/>
+  </manifest>
+  <spine><itemref idref="c0"/></spine>
+</package>''')
+        z.writestr('OEBPS/chapter0.xhtml',
+            '<html><body><p>Hello</p><img src="../images/cover.png"/></body></html>')
+        z.writestr('OEBPS/images/cover.png', image_bytes)
+    buf.seek(0)
+    return buf.read()
+
+def test_asset_endpoint_serves_image(client, tmp_path):
+    epub_data = make_epub_with_image()
+    (tmp_path / 'mybook.epub').write_bytes(epub_data)
+    with patch('server.BOOKS_DIR', str(tmp_path)):
+        r = client.get('/book/mybook/asset/OEBPS/images/cover.png')
+    assert r.status_code == 200
+    assert r.content_type.startswith('image/')
+
+def test_asset_endpoint_404_for_missing_file(client, tmp_path):
+    epub_data = make_epub_with_image()
+    (tmp_path / 'mybook.epub').write_bytes(epub_data)
+    with patch('server.BOOKS_DIR', str(tmp_path)):
+        r = client.get('/book/mybook/asset/OEBPS/images/missing.png')
+    assert r.status_code == 404
+
+def test_asset_endpoint_rejects_path_traversal(client, tmp_path):
+    epub_data = make_epub_with_image()
+    (tmp_path / 'mybook.epub').write_bytes(epub_data)
+    with patch('server.BOOKS_DIR', str(tmp_path)):
+        r = client.get('/book/mybook/asset/../../../etc/passwd')
+    assert r.status_code in (400, 404)
+
+
+# ── normalize_html unit tests ─────────────────────────────────────────────────
+
+def test_normalize_strips_script_and_style():
+    html = '<p>Hello</p><script>alert(1)</script><style>p{color:red}</style>'
+    result = normalize_html(html, 'mybook', 'zh')
+    assert '<script>' not in result
+    assert '<style>' not in result
+    assert 'Hello' in result
+
+def test_normalize_strips_on_attrs():
+    html = '<p onclick="evil()">Text</p><img onerror="evil()" src="x.png"/>'
+    result = normalize_html(html, 'mybook', 'zh')
+    assert 'onclick' not in result
+    assert 'onerror' not in result
+
+def test_normalize_strips_javascript_href():
+    html = '<a href="javascript:alert(1)">Click</a>'
+    result = normalize_html(html, 'mybook', 'zh')
+    assert 'javascript:' not in result
+
+def test_normalize_keeps_semantic_inline_styles():
+    html = '<p style="font-style:italic;color:red;font-size:14px">Text</p>'
+    result = normalize_html(html, 'mybook', 'zh')
+    assert 'font-style:italic' in result or 'font-style: italic' in result
+    assert 'color' not in result
+    assert 'font-size' not in result
+
+def test_normalize_strips_class_attrs():
+    html = '<p class="epub-chapter-body">Text</p>'
+    result = normalize_html(html, 'mybook', 'zh')
+    assert 'class=' not in result
+
+def test_normalize_unwraps_font_tag():
+    html = '<p><font face="Times" color="red">Text</font></p>'
+    result = normalize_html(html, 'mybook', 'zh')
+    assert '<font' not in result
+    assert 'Text' in result
+
+def test_normalize_collapses_br_runs():
+    html = '<p>First</p><br/><br/><br/><p>Second</p>'
+    result = normalize_html(html, 'mybook', 'zh')
+    assert result.count('<br') <= 1
+
+def test_normalize_rewrites_image_paths():
+    html = '<img src="../images/cover.png" alt="cover"/>'
+    result = normalize_html(html, 'mybook', 'zh', chapter_base='OEBPS')
+    assert '/book/mybook/asset/' in result
+
+def test_normalize_strips_img_dimensions():
+    html = '<img src="../images/foo.png" width="600" height="400"/>'
+    result = normalize_html(html, 'mybook', 'zh', chapter_base='OEBPS')
+    assert 'width=' not in result
+    assert 'height=' not in result
+
+def test_normalize_converts_svg_image_wrapper():
+    html = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 400">
+      <image xlink:href="../images/illus.jpg" width="600" height="400"/>
+    </svg>'''
+    result = normalize_html(html, 'mybook', 'zh', chapter_base='OEBPS')
+    assert '<img' in result
+    assert '<svg' not in result
+
+def test_normalize_preserves_ruby():
+    html = '<ruby>漢<rt>かん</rt>字<rt>じ</rt></ruby>'
+    result = normalize_html(html, 'mybook', 'ja')
+    assert '<ruby>' in result
+    assert '<rt>' in result

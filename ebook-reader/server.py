@@ -1,4 +1,4 @@
-import zipfile, io, os, re, base64, sqlite3, datetime
+import zipfile, io, os, re, base64, sqlite3, datetime, mimetypes, posixpath
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from flask import Flask, jsonify, Response, send_file, send_from_directory, abort, request
@@ -187,7 +187,125 @@ def cover(book_id):
     return send_file(io.BytesIO(_PLACEHOLDER_PNG), mimetype='image/png')
 
 
-# ── XSS sanitization + CJK wrapping ──────────────────────────────────────────
+@app.route('/book/<book_id>/asset/<path:asset_path>')
+def asset(book_id, asset_path):
+    _validate_book_id(book_id)
+    if '..' in asset_path or asset_path.startswith('/'):
+        abort(400)
+    epub_path = Path(BOOKS_DIR) / f'{book_id}.epub'
+    if not epub_path.exists():
+        abort(404)
+    try:
+        with _open_epub(epub_path.read_bytes()) as z:
+            data = z.read(asset_path)
+    except KeyError:
+        abort(404)
+    mime = mimetypes.guess_type(asset_path)[0] or 'application/octet-stream'
+    return Response(data, mimetype=mime)
+
+
+# ── HTML normalization pipeline ───────────────────────────────────────────────
+
+_STYLE_ALLOWLIST = {'font-style', 'font-weight', 'vertical-align'}
+_VERTICAL_ALIGN_VALUES = {'sub', 'super'}
+
+
+def _parse_inline_style(style_str: str) -> dict:
+    result = {}
+    for decl in style_str.split(';'):
+        decl = decl.strip()
+        if ':' in decl:
+            prop, _, val = decl.partition(':')
+            result[prop.strip().lower()] = val.strip()
+    return result
+
+
+def _filter_inline_style(style_str: str) -> str | None:
+    props = _parse_inline_style(style_str)
+    kept = []
+    for prop, val in props.items():
+        if prop not in _STYLE_ALLOWLIST:
+            continue
+        if prop == 'vertical-align' and val not in _VERTICAL_ALIGN_VALUES:
+            continue
+        kept.append(f'{prop}:{val}')
+    return '; '.join(kept) if kept else None
+
+
+def _rewrite_epub_src(src: str, book_id: str, chapter_base: str) -> str:
+    if src.startswith('data:') or src.startswith('http'):
+        return src
+    resolved = posixpath.normpath(posixpath.join(chapter_base, src))
+    resolved = resolved.lstrip('/')
+    return f'/book/{book_id}/asset/{resolved}'
+
+
+def normalize_html(html: str, book_id: str, lang: str, chapter_base: str = 'OEBPS') -> str:
+    soup = BeautifulSoup(html, 'lxml')
+    for tag in soup.find_all(['script', 'style', 'iframe', 'object', 'embed']):
+        tag.decompose()
+    for tag in soup.find_all('font'):
+        tag.unwrap()
+    for tag in soup.find_all(True):
+        attrs_to_remove = []
+        for attr in list(tag.attrs):
+            if attr.startswith('on'):
+                attrs_to_remove.append(attr)
+            elif attr == 'class':
+                attrs_to_remove.append(attr)
+            elif attr in ('align', 'valign', 'hspace', 'vspace'):
+                attrs_to_remove.append(attr)
+            elif attr == 'href':
+                if str(tag.get('href', '')).strip().lower().startswith('javascript:'):
+                    attrs_to_remove.append(attr)
+            elif attr == 'src':
+                if str(tag.get('src', '')).strip().lower().startswith('javascript:'):
+                    attrs_to_remove.append(attr)
+            elif attr == 'style':
+                filtered = _filter_inline_style(str(tag.get('style', '')))
+                if filtered:
+                    tag['style'] = filtered
+                else:
+                    attrs_to_remove.append(attr)
+        for attr in attrs_to_remove:
+            del tag[attr]
+        if tag.name == 'img':
+            tag.attrs.pop('width', None)
+            tag.attrs.pop('height', None)
+            src = tag.get('src', '')
+            if src and not src.startswith('/book/') and not src.startswith('http'):
+                tag['src'] = _rewrite_epub_src(src, book_id, chapter_base)
+    for br in soup.find_all('br'):
+        siblings = list(br.next_siblings)
+        count = 1
+        to_remove = []
+        for sib in siblings:
+            if hasattr(sib, 'name') and sib.name == 'br':
+                count += 1
+                to_remove.append(sib)
+            elif hasattr(sib, 'string') and not str(sib).strip():
+                to_remove.append(sib)
+            else:
+                break
+        if count >= 2:
+            for r in to_remove:
+                r.decompose()
+            br.replace_with(BeautifulSoup('<p></p>', 'lxml').find('p'))
+    for svg in soup.find_all('svg'):
+        children = [c for c in svg.children if hasattr(c, 'name') and c.name is not None]
+        if len(children) == 1 and children[0].name == 'image':
+            img_tag = children[0]
+            href = img_tag.get('xlink:href') or img_tag.get('href') or ''
+            new_img = soup.new_tag('img', alt='')
+            new_img['src'] = _rewrite_epub_src(href, book_id, chapter_base) if href else ''
+            svg.replace_with(new_img)
+        else:
+            svg.decompose()
+    body = soup.find('body')
+    return body.decode_contents() if body else str(soup)
+
+
+# ── CJK wrapping ──────────────────────────────────────────────────────────────
 
 _CJK_RE = re.compile(
     r'[\u4e00-\u9fff'
@@ -247,19 +365,21 @@ def wrap_cjk(html: str, language: str) -> str:
     return str(soup.body or soup)
 
 
-def extract_chapter(data: bytes, index: int) -> str | None:
+def extract_chapter(data: bytes, index: int, book_id: str = '') -> str | None:
     paths = get_chapter_paths(data)
     if index >= len(paths):
         return None
+    chapter_path = paths[index]
+    chapter_base = chapter_path.rsplit('/', 1)[0] if '/' in chapter_path else ''
     with _open_epub(data) as z:
-        raw = z.read(paths[index]).decode('utf-8', errors='replace')
+        raw = z.read(chapter_path).decode('utf-8', errors='replace')
     soup = BeautifulSoup(raw, 'lxml')
-    _sanitize_html(soup)
     body = soup.find('body')
     content = body.decode_contents() if body else raw
     if not content.strip():
         content = '<p class="chapter-empty">Chapter has no readable content.</p>'
-    return content
+    meta = parse_epub_metadata(data)
+    return normalize_html(content, book_id, meta['language'], chapter_base)
 
 
 # ── Chapter + static ──────────────────────────────────────────────────────────
@@ -272,14 +392,16 @@ def chapter(book_id, index):
         abort(404)
     try:
         data = epub_path.read_bytes()
-        content = extract_chapter(data, index)
+        content = extract_chapter(data, index, book_id)
     except Exception:
         abort(500)
     if content is None:
         abort(404)
     meta = parse_epub_metadata(data)
-    wrapped = wrap_cjk(content, meta['language'])
-    return Response(wrapped, mimetype='text/html; charset=utf-8')
+    lang = meta['language']
+    wrapped = wrap_cjk(content, lang)
+    fragment = f'<article data-lang="{lang}">{wrapped}</article>'
+    return Response(fragment, mimetype='text/html; charset=utf-8')
 
 
 # ── Profile endpoints ─────────────────────────────────────────────────────────
