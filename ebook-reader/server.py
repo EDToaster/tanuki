@@ -173,7 +173,9 @@ def wrap_cjk(html: str, language: str) -> str:
             continue
         wrapped = wrap_fn(str(node))
         if wrapped != str(node):
-            node.replace_with(BeautifulSoup(wrapped, 'lxml').body.decode_contents())
+            new_soup = BeautifulSoup(wrapped, 'lxml')
+            new_nodes = list(new_soup.body.children)
+            node.replace_with(*[n.extract() for n in new_nodes])
     return str(soup.body or soup)
 
 
