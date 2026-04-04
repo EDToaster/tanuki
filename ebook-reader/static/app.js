@@ -102,7 +102,9 @@ async function showLibrary(profile) {
   books.forEach(book => {
     const card = document.createElement('div');
     card.className = 'book-card';
-    card.style.position = 'relative';
+
+    const imgWrap = document.createElement('div');
+    imgWrap.className = 'book-cover';
 
     // Use DOM API / textContent — never innerHTML with server data.
     const img = document.createElement('img');
@@ -119,15 +121,17 @@ async function showLibrary(profile) {
     authorEl.className = 'book-author';
     authorEl.textContent = book.author;
 
-    card.append(img, titleEl, authorEl);
+    imgWrap.appendChild(img);
 
     const prog = progressMap.get(book.id);
     if (prog) {
       const badge = document.createElement('div');
       badge.className = 'continue-badge';
       badge.textContent = `Ch ${prog.chapter_id + 1} · p ${prog.page_index + 1}`;
-      card.appendChild(badge);
+      imgWrap.appendChild(badge);
     }
+
+    card.append(imgWrap, titleEl, authorEl);
 
     card.addEventListener('click', () => navigate(`/u/${profile}/book/${book.id}`));
     grid.appendChild(card);

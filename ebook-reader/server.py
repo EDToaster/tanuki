@@ -1,4 +1,4 @@
-import zipfile, io, os, re, base64, sqlite3, datetime, mimetypes, posixpath, json
+import zipfile, io, os, re, base64, sqlite3, datetime, mimetypes, posixpath, json, hashlib
 import xml.etree.ElementTree as ET
 import xml.etree.ElementTree as ET2  # alias for NIKL XML parsing
 import urllib.request
@@ -149,21 +149,41 @@ def _cached_epub_meta(epub_path: Path) -> dict | None:
         return None
 
 
+# ── Book registry ─────────────────────────────────────────────────────────────
+# Maps stable ID → absolute Path. Rebuilt on each /library call.
+# ID = first 12 hex chars of SHA1 of the relative path string, so it's stable
+# across restarts and works for both flat and nested (Readarr-style) layouts.
+
+_book_registry: dict[str, Path] = {}
+
+
+def _epub_id(rel: Path) -> str:
+    return hashlib.sha1(str(rel).encode()).hexdigest()[:12]
+
+
+def _epub_path(book_id: str) -> Path | None:
+    return _book_registry.get(book_id)
+
+
 # ── Library ───────────────────────────────────────────────────────────────────
 
 @app.route('/library')
 def library():
+    _book_registry.clear()
     books = []
-    for epub_path in sorted(Path(BOOKS_DIR).glob('*.epub')):
+    for epub_path in sorted(Path(BOOKS_DIR).rglob('*.epub')):
+        rel  = epub_path.relative_to(BOOKS_DIR)
+        bid  = _epub_id(rel)
+        _book_registry[bid] = epub_path
         meta = _cached_epub_meta(epub_path)
         if meta:
             books.append({
-                'id': epub_path.stem,
+                'id': bid,
                 'title': meta['title'],
                 'author': meta['author'],
                 'language': meta['language'],
                 'chapter_count': meta['chapter_count'],
-                'cover_url': f'/book/{epub_path.stem}/cover',
+                'cover_url': f'/book/{bid}/cover',
             })
     return jsonify(books)
 
@@ -195,8 +215,8 @@ def get_cover_bytes(data: bytes) -> tuple[bytes, str] | None:
 @app.route('/book/<book_id>/cover')
 def cover(book_id):
     _validate_book_id(book_id)
-    epub_path = Path(BOOKS_DIR) / f'{book_id}.epub'
-    if not epub_path.exists():
+    epub_path = _epub_path(book_id)
+    if not epub_path:
         abort(404)
     result = get_cover_bytes(epub_path.read_bytes())
     if result:
@@ -210,8 +230,8 @@ def asset(book_id, asset_path):
     _validate_book_id(book_id)
     if '..' in asset_path or asset_path.startswith('/'):
         abort(400)
-    epub_path = Path(BOOKS_DIR) / f'{book_id}.epub'
-    if not epub_path.exists():
+    epub_path = _epub_path(book_id)
+    if not epub_path:
         abort(404)
     try:
         with _open_epub(epub_path.read_bytes()) as z:
@@ -559,8 +579,8 @@ def extract_chapter(data: bytes, index: int, book_id: str = '') -> str | None:
 @app.route('/book/<book_id>/chapter/<int:index>')
 def chapter(book_id, index):
     _validate_book_id(book_id)
-    epub_path = Path(BOOKS_DIR) / f'{book_id}.epub'
-    if not epub_path.exists():
+    epub_path = _epub_path(book_id)
+    if not epub_path:
         abort(404)
     try:
         data = epub_path.read_bytes()
