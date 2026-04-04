@@ -337,6 +337,17 @@ _CJK_RE = re.compile(
 jieba.initialize()  # pre-load trie at startup
 
 
+def _strip_punct(s: str) -> str:
+    """Strip leading/trailing Unicode punctuation from a lookup term."""
+    import unicodedata
+    i, j = 0, len(s)
+    while i < j and unicodedata.category(s[i]) in ('Po', 'Ps', 'Pe', 'Pi', 'Pf', 'Pd', 'Pc'):
+        i += 1
+    while j > i and unicodedata.category(s[j - 1]) in ('Po', 'Ps', 'Pe', 'Pi', 'Pf', 'Pd', 'Pc'):
+        j -= 1
+    return s[i:j]
+
+
 class Segmenter(ABC):
     @abstractmethod
     def segment(self, text: str) -> list[tuple[str, str | None]]:
@@ -357,7 +368,7 @@ class JiebaSegmenter(Segmenter):
             if not token:
                 continue
             if _CJK_RE.search(token):
-                result.append((token, token))
+                result.append((token, _strip_punct(token) or token))
             else:
                 result.append((token, None))
         return result
@@ -380,13 +391,17 @@ class KoreanJosaSegmenter(Segmenter):
                 result.append((' ', None))
             if not token:
                 continue
-            if not _CJK_RE.search(token):
-                result.append((token, token))
+            clean = _strip_punct(token)
+            if not clean:
+                result.append((token, None))
                 continue
-            stem = token
+            if not _CJK_RE.search(clean):
+                result.append((token, clean))
+                continue
+            stem = clean
             for josa in _JOSA_LIST:
-                if token.endswith(josa) and len(token) > len(josa):
-                    stem = token[:-len(josa)]
+                if clean.endswith(josa) and len(clean) > len(josa):
+                    stem = clean[:-len(josa)]
                     break
             result.append((token, stem))
         return result
@@ -400,7 +415,8 @@ class WhitespaceSegmenter(Segmenter):
             if i > 0:
                 result.append((' ', None))
             if token:
-                result.append((token, token))
+                clean = _strip_punct(token)
+                result.append((token, clean if clean else None))
         return result
 
 
@@ -603,7 +619,10 @@ class WiktionaryProvider(DictProvider):
             f'&page={urllib.parse.quote(word)}&prop=text&format=json'
         )
         try:
-            with urllib.request.urlopen(url, timeout=5) as resp:
+            req = urllib.request.Request(url, headers={
+                'User-Agent': 'tanuki-ebook-reader/1.0'
+            })
+            with urllib.request.urlopen(req, timeout=5) as resp:
                 data = json.loads(resp.read())
         except Exception:
             return None
@@ -622,7 +641,18 @@ class WiktionaryProvider(DictProvider):
                     lang_heading = h2
                     break
 
-        root = lang_heading.parent if lang_heading else doc
+        if lang_heading:
+            # Modern Wiktionary wraps <h2> in <div class="mw-heading mw-heading2">;
+            # the actual content is in sibling elements after that wrapper div.
+            wrapper = lang_heading.parent if lang_heading.parent.name == 'div' else lang_heading
+            section_html = ''
+            for sib in wrapper.next_siblings:
+                if hasattr(sib, 'get') and 'mw-heading2' in (sib.get('class') or []):
+                    break
+                section_html += str(sib)
+            root = BeautifulSoup(section_html, 'lxml') if section_html else doc
+        else:
+            root = doc
 
         pronunciation = ''
         pron_el = root.find(class_=['IPA', 'pinyin'])
