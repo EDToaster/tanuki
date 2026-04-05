@@ -858,15 +858,21 @@ def _save_disk_cache(cache: dict) -> None:
 _DISK_CACHE: dict = _load_disk_cache()
 
 
+def _base_lang(lang: str) -> str:
+    """Normalize BCP-47 subtags to base: 'zh-hans' → 'zh', 'ko-KR' → 'ko'."""
+    return lang.split('-')[0].lower()
+
+
 def _lookup_word(word: str, lang: str) -> dict:
     cache_key = f'{lang}:{word}'
     if cache_key in _DISK_CACHE:
         return _DISK_CACHE[cache_key]
 
-    chain = PROVIDER_CHAINS.get(lang) or PROVIDER_CHAINS.get('*', [])
+    base = _base_lang(lang)
+    chain = PROVIDER_CHAINS.get(base) or PROVIDER_CHAINS.get('*', [])
     for provider in chain:
         try:
-            result = provider.lookup(word, lang=lang)
+            result = provider.lookup(word, lang=base)
             if result is not None:
                 _DISK_CACHE[cache_key] = result
                 _save_disk_cache(_DISK_CACHE)
