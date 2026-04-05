@@ -1,9 +1,11 @@
-import zipfile, io, os, re, base64, sqlite3, datetime, mimetypes, posixpath, json, hashlib
+import zipfile, io, os, re, base64, sqlite3, datetime, mimetypes, posixpath, json, hashlib, itertools
 import xml.etree.ElementTree as ET
 import xml.etree.ElementTree as ET2  # alias for NIKL XML parsing
 import urllib.request
 import urllib.parse
 import jieba
+from pypinyin import pinyin as pypinyin_pinyin, Style as PinyinStyle
+from korean_romanizer.romanizer import Romanizer as KoreanRomanizer
 from abc import ABC, abstractmethod
 from typing import Optional
 from pathlib import Path
@@ -697,8 +699,21 @@ class WiktionaryProvider(DictProvider):
             return None
 
         readings = []
-        if pronunciation:
-            readings.append({'text': pronunciation, 'romanization': None})
+        if lang == 'zh':
+            try:
+                # heteronym=True returns all possible readings per character
+                per_char = pypinyin_pinyin(word, style=PinyinStyle.TONE, heteronym=True)
+                # per_char is a list of lists: [[readings for char0], [readings for char1], ...]
+                # Build the cross-product of unique combinations
+                combos = [' '.join(combo) for combo in itertools.product(*per_char)]
+                for combo in combos:
+                    readings.append({'text': pronunciation, 'romanization': combo})
+            except Exception:
+                if pronunciation:
+                    readings.append({'text': pronunciation, 'romanization': None})
+        else:
+            if pronunciation:
+                readings.append({'text': pronunciation, 'romanization': None})
 
         source_url = f'https://en.wiktionary.org/wiki/{urllib.parse.quote(word)}'
         return normalize_dict_response({
@@ -720,8 +735,11 @@ _NIKL_POS_MAP = {
 }
 
 
-def _romanize_hangul_simple(text: str) -> str:
-    return text  # stub; returns text as-is
+def _romanize_hangul_simple(text: str) -> Optional[str]:
+    try:
+        return KoreanRomanizer(text).romanize()
+    except Exception:
+        return None
 
 
 class NIKLProvider(DictProvider):

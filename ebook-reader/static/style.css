@@ -65,7 +65,8 @@ span.w.active { background: rgba(92,122,92,0.3); }
 .popup-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
 #popup-word { font-size: 1.8rem; font-weight: 700; font-family: var(--reader-font); }
 #popup-close { background: none; border: none; font-size: 1.2rem; cursor: pointer; padding: 4px 8px; min-width: 44px; min-height: 44px; }
-#popup-pronunciation { font-size: 1rem; color: var(--accent); margin-bottom: 10px; }
+#popup-pronunciation { font-size: 1rem; color: var(--accent); margin-bottom: 4px; }
+#popup-romanization { font-size: 0.9rem; color: #888; margin-bottom: 10px; }
 #popup-definitions { font-size: 0.9rem; line-height: 1.7; }
 #popup-definitions li { margin-left: 18px; margin-bottom: 4px; }
 #popup-source-link { display: block; margin-top: 14px; font-size: 0.85rem; color: var(--accent); text-decoration: none; }

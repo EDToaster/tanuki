@@ -336,21 +336,22 @@ async function lookupWord(word) {
     // Render from cache — avoid any network request
     const cached = dictCache.get(cacheKey);
     if (!cached) {
-      showPopup(word, '', ['No dictionary entry found.'], null);
+      showPopup(word, '', '', ['No dictionary entry found.'], null);
     } else {
       const pronunciation = cached.readings?.[0]?.text ?? '';
+      const romanization = (cached.readings ?? []).map(r => r.romanization).filter(Boolean).join(' / ');
       const definitions = (cached.definitions ?? []).slice(0, 5).map(d => d.text);
       const sourceLabel = cached.source === 'nikl'
         ? 'Open in KRDICT ↗'
         : cached.source === 'wiktionary'
         ? 'Open in Wiktionary ↗'
         : 'Open source ↗';
-      showPopup(word, pronunciation, definitions, cached.source_url, sourceLabel);
+      showPopup(word, pronunciation, romanization, definitions, cached.source_url, sourceLabel);
     }
     return;
   }
 
-  showPopup(word, null, null, null);  // loading state
+  showPopup(word, null, '', null, null);  // loading state
 
   let result = null;
   let networkError = false;
@@ -366,7 +367,7 @@ async function lookupWord(word) {
   }
 
   if (networkError || !result) {
-    showPopup(word, '', ['Network error — check connection.'], null);
+    showPopup(word, '', '', ['Network error — check connection.'], null);
     return;
   }
 
@@ -374,11 +375,12 @@ async function lookupWord(word) {
   dictCache.set(cacheKey, result.not_found ? null : result);
 
   if (result.not_found) {
-    showPopup(word, '', ['No dictionary entry found.'], null);
+    showPopup(word, '', '', ['No dictionary entry found.'], null);
     return;
   }
 
   const pronunciation = result.readings?.[0]?.text ?? '';
+  const romanization = (result.readings ?? []).map(r => r.romanization).filter(Boolean).join(' / ');
   const definitions = (result.definitions ?? []).slice(0, 5).map(d => d.text);
   const sourceLabel = result.source === 'nikl'
     ? 'Open in KRDICT ↗'
@@ -387,13 +389,14 @@ async function lookupWord(word) {
     : 'Open source ↗';
   const sourceUrl = result.source_url;
 
-  showPopup(word, pronunciation, definitions, sourceUrl, sourceLabel);
+  showPopup(word, pronunciation, romanization, definitions, sourceUrl, sourceLabel);
 }
 
-function showPopup(word, pronunciation, definitions, sourceUrl, sourceLabel) {
+function showPopup(word, pronunciation, romanization, definitions, sourceUrl, sourceLabel) {
   document.getElementById('popup-word').textContent = word;
   document.getElementById('popup-pronunciation').textContent =
     pronunciation !== null ? (pronunciation || '') : 'Loading…';
+  document.getElementById('popup-romanization').textContent = romanization || '';
 
   const defEl = document.getElementById('popup-definitions');
   if (definitions === null) {
