@@ -699,21 +699,8 @@ class WiktionaryProvider(DictProvider):
             return None
 
         readings = []
-        if lang == 'zh':
-            try:
-                # heteronym=True returns all possible readings per character
-                per_char = pypinyin_pinyin(word, style=PinyinStyle.TONE, heteronym=True)
-                # per_char is a list of lists: [[readings for char0], [readings for char1], ...]
-                # Build the cross-product of unique combinations
-                combos = [' '.join(combo) for combo in itertools.product(*per_char)]
-                for combo in combos:
-                    readings.append({'text': pronunciation, 'romanization': combo})
-            except Exception:
-                if pronunciation:
-                    readings.append({'text': pronunciation, 'romanization': None})
-        else:
-            if pronunciation:
-                readings.append({'text': pronunciation, 'romanization': None})
+        if pronunciation:
+            readings.append({'text': pronunciation, 'romanization': None})
 
         source_url = f'https://en.wiktionary.org/wiki/{urllib.parse.quote(word)}'
         return normalize_dict_response({
@@ -863,6 +850,25 @@ def _base_lang(lang: str) -> str:
     return lang.split('-')[0].lower()
 
 
+def _fill_romanization(result: dict, base: str) -> dict:
+    """Populate romanization on all readings using pypinyin (zh) or KoreanRomanizer (ko)."""
+    if base == 'zh':
+        try:
+            per_char = pypinyin_pinyin(result['word'], style=PinyinStyle.TONE, heteronym=True)
+            combos = [' '.join(combo) for combo in itertools.product(*per_char)]
+            existing_text = result['readings'][0]['text'] if result['readings'] else ''
+            result['readings'] = [
+                {'text': existing_text, 'romanization': combo} for combo in combos
+            ]
+        except Exception:
+            pass
+    elif base == 'ko':
+        for r in result['readings']:
+            if r.get('romanization') is None:
+                r['romanization'] = _romanize_hangul_simple(r['text'])
+    return result
+
+
 def _lookup_word(word: str, lang: str) -> dict:
     cache_key = f'{lang}:{word}'
     if cache_key in _DISK_CACHE:
@@ -874,11 +880,13 @@ def _lookup_word(word: str, lang: str) -> dict:
         try:
             result = provider.lookup(word, lang=base)
             if result is not None:
+                result = _fill_romanization(result, base)
                 _DISK_CACHE[cache_key] = result
                 _save_disk_cache(_DISK_CACHE)
                 return result
         except Exception:
             continue
+
     return not_found_response(word)
 
 
